@@ -5,13 +5,15 @@ from copy import deepcopy
 
 # from .utils import reindex_dataclass
 
-
-@dataclass()
-class AttrDict:
-    """Dataclass to store attributes for a dataset."""
-
-    a: int | None = None
-
+class AttrDict(dict):
+    """Dictionary to store attributes for a dataset."""
+    def __getattr__(self, item):
+        try:
+            return self[item]
+        except KeyError as e:
+            raise AttributeError from e
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
 
 @dataclass
 class Stations:
@@ -20,6 +22,7 @@ class Stations:
     latitudes: np.ndarray | None = None
     longitudes: np.ndarray | None = None
     elevations: np.ndarray | None = None
+    burials: np.ndarray | None = None
     depths: np.ndarray | None = None
     azimuths: np.ndarray | None = None
     back_azimuths: np.ndarray | None = None
@@ -27,8 +30,6 @@ class Stations:
     attributes: AttrDict | None = None
 
     def __post_init__(self):
-
-        print(self)
 
         attr = self.__dict__.keys()
 
@@ -40,6 +41,8 @@ class Stations:
                     raise ValueError(
                         f"Number of stations and {_attname}s do not match."
                     )
+                if not isinstance(_att, np.ndarray):
+                    self.__setattr__(_attname, np.ndarray(_att.tolist()))
 
     def copy(self):
         return deepcopy(self)
@@ -58,6 +61,7 @@ class Meta:
     components: list
     stations: Stations
     origin: obspy.UTCDateTime = None
+    extras: AttrDict = None
 
     @classmethod
     def from_dict(cls, meta_dict: dict):
@@ -83,11 +87,12 @@ class Meta:
             npts=meta_dict["npts"],
             delta=meta_dict["delta"],
             components=meta_dict["components"],
+
             stations=Stations(
-                codes=meta_dict["stations"],
-                latitudes=meta_dict["latitudes"],
-                longitudes=meta_dict["longitudes"],
-                elevations=meta_dict["elevations"],
+                codes=np.array(meta_dict["stations"]),
+                latitudes=np.array(meta_dict["latitudes"]),
+                longitudes=np.array(meta_dict["longitudes"]),
+                burials=np.array(meta_dict["burials"]),
             ),
             origin=meta_dict["origin"],
         )
@@ -105,6 +110,8 @@ class Meta:
             "origin": self.origin,
         }
 
+    def copy(self):
+        return deepcopy(self)
 
 #     def
 #         # Check overlapping stations

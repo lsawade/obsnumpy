@@ -7,7 +7,7 @@ from . import utils
 from collections import OrderedDict
 from .meta import Meta
 from .meta import Stations
-from .process import filter, interpolate, taper
+from .process import filter, interpolate, taper, convolve
 from .convenience import preprocess
 from warnings import warn
 
@@ -29,9 +29,10 @@ class Dataset:
                 f"Data must have shape (ntraces, 3, npts), but has shape {data_shape}"
             )
 
-        if data_shape[1] != 3:
+        if data_shape[1] != len(self.meta.components):
             raise ValueError(
-                f"Data must have shape (ntraces, 3, npts), but has shape {data_shape}"
+                f"Data must have shape (ntraces, {len(self.meta.components)}, npts) "
+                f" to match meta data but has shape {data_shape}"
             )
 
     @classmethod
@@ -110,7 +111,7 @@ class Dataset:
             _net, _sta = station.split(".")
             substream = st.select(network=_net, station=_sta)
 
-            if len(substream) < 3 or len(substream) > 3:
+            if len(substream) < len(components) or len(substream) > len(components):
                 print(
                     f"Station {station} has {len(substream)} components. \n   --> Station selection not working properly!."
                 )
@@ -122,6 +123,7 @@ class Dataset:
                     array[i, j, :] = subtr[0].data
                 else:
                     print(f"Did not find component {component} for station {station}")
+
 
             fstations.append(station)
 
@@ -151,6 +153,9 @@ class Dataset:
             latitudes = None
             longitudes = None
 
+
+
+        print(latitudes, longitudes)
         # Compute Geometry if the event latitude and longitude are set and
         # station latitudes and longitudes are set
         if (event_latitude is not None and event_longitude is not None) and (
@@ -496,18 +501,89 @@ class Dataset:
             **kwargs,
         )
 
+    def convolve(self, wavelet: np.ndarray, tshift: float = 0.0):
+        """The expectation is that the wavelet is at the same sampling rate as,
+        as the data. The wavelet should be a 1D numpy array."""
+
+        # Compute the convolution between the wavelet and the data
+        self.data = convolve.convolve(self.data, wavelet, self.meta.delta, tshift)
+
+    def compute_geometry(self, event_latitude, event_longitude):
+        """Compute the geometry of the stations with respect to the event. This
+        function will compute the azimuth, distance, and back azimuth of each
+        station with respect to the event.
+
+        Parameters
+        ----------
+        event_latitude : float
+            latitude of the event
+        event_longitude : float
+            longitude of the event
+        """
+
+        # Get latitudes
+        latitudes = self.meta.stations.latitudes
+        longitudes = self.meta.stations.longitudes
+
+        # Compute azimuth and distance
+        dist, az, baz = utils.distazbaz(
+            event_latitude, event_longitude, latitudes, longitudes
+        )
+
+        # Compute distance in degrees
+        self.meta.stations.distances = dist / 1000.0 / 111.11
+        self.meta.stations.azimuths = az
+        self.meta.stations.back_azimuths = baz
+
     def __len__(self):
         return len(self.meta.stations)
 
-    def subset(self, idx) -> Dataset:
+    def subset(self, stations=None, components=None) -> Dataset:
         """Given a set of indeces this function will create a new dataset with.
         only the selected stations."""
 
-        # Reindex the input metadata
-        new_meta = utils.reindex_dataclass(self.meta, idx, len(self))
+        new_meta = self.meta.copy()
 
-        # New data
-        new_data = self.data[idx, ...].copy()
+        if components:
+
+            if isinstance(components, str):
+                idc = self.meta.components.index(components)
+                idc = slice(idc, idc + 1)
+                new_meta.components = [components,]
+
+            elif isinstance(components, list):
+                idc = np.array([self.meta.components.index(comp) for comp in components])
+                if len(idc) == 1:
+                    idc = slice(idc, idc+1)
+                new_meta.components = components
+
+            else:
+                raise ValueError("Components must be a list or a string.")
+
+        if stations is not None:
+            if isinstance(stations, int):
+                ids = slice(stations, stations + 1)
+
+            elif len(stations) == 1:
+                ids = slice(stations, stations + 1)
+
+            else:
+                ids = stations
+
+            # Reindex the input metadata
+            new_meta = utils.reindex(new_meta, ids, len(self), debug=False)
+
+        if stations is None and components is not None:
+            new_data = self.data[:, idc, :].copy()
+
+        elif stations is not None and components is None:
+            # New data
+            new_data = self.data[ids, ...].copy()
+
+        elif stations is not None and components is not None:
+            # New data
+            new_data = self.data[ids, idc, :].copy()
+
 
         # Check whether len of data is equal the length station codes
         if len(new_meta.stations.codes) != new_data.shape[0]:
@@ -517,7 +593,11 @@ class Dataset:
 
         return Dataset(data=new_data, meta=new_meta)
 
-    def intersect(self, other: Dataset) -> tp.Tuple[Dataset, Dataset]:
+    @property
+    def t(self):
+        return np.arange(0, self.meta.npts * self.meta.delta, self.meta.delta)
+
+    def intersection(self, other: Dataset) -> tp.Tuple[Dataset, Dataset]:
         """You did well copilot!"""
 
         # Get common stations
@@ -526,8 +606,15 @@ class Dataset:
         )
 
         # Get indeces
-        idx1 = [self.meta.stations.codes.index(code) for code in common]
-        idx2 = [other.meta.stations.codes.index(code) for code in common]
+        idx1 = [int(np.where(self.meta.stations.codes==code)[0]) for code in common]
+        idx2 = [int(np.where(other.meta.stations.codes==code)[0]) for code in common]
 
         # Return subsets of the datasets
         return self.subset(idx1), other.subset(idx2)
+
+    def index(self, code: str) -> int:
+        return int(np.where(self.meta.stations.codes==code)[0])
+
+    def copy(self) -> Dataset:
+        """Copy the dataset."""
+        return deepcopy(self)
