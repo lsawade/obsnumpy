@@ -1,9 +1,49 @@
 import numpy as np
 import obspy
+import dataclasses
 from dataclasses import dataclass, fields
 from copy import deepcopy
+import json
 
 # from .utils import reindex_dataclass
+
+def convert_to_ndarray(d: dict, length: int) -> dict:
+    """This function convertes every ``list`` entry of a ``dict`` of a given length to a numpy array.
+    This is used to load a dictionary from a json file and convert it to a dictionary of numpy arrays.
+    Unless it's a list 
+    """
+    
+    for key, value in d.items():
+        if isinstance(value, list):
+            # Only convert numeric lists
+            if len(value) == length and isinstance(value[0], (int, float)):
+                d[key] = np.array(value)
+            else:
+                pass
+        elif isinstance(value, dict):
+            d[key] = convert_to_ndarray(value, length)
+            
+    return d
+
+
+class EnhancedJSONEncoder(json.JSONEncoder):
+    def default(self, o):
+        try:
+            if isinstance(o, AttrDict):
+                return o.to_dict()
+            elif isinstance(o, np.ndarray):
+                return o.tolist()
+            elif isinstance(o, obspy.UTCDateTime):
+                return o.isoformat()
+            elif dataclasses.is_dataclass(o):
+                return dataclasses.asdict(o)
+        except TypeError as e:
+            print(o)
+            print(e)
+            raise e
+            
+        return super().default(o)
+
 
 class AttrDict(dict):
     """Dictionary to store attributes for a dataset."""
@@ -14,6 +54,7 @@ class AttrDict(dict):
             raise AttributeError from e
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
+
 
 @dataclass
 class Stations:
@@ -36,14 +77,22 @@ class Stations:
         for _attname in attr:
 
             _att = self.__getattribute__(_attname)
-            if _att is not None:
-                if len(self.codes) != len(_att):
+            
+            
+            if _att is not None and _attname != "codes":
+                
+                if len(self.codes) != len(_att) and _attname != "attributes":                   
                     raise ValueError(
                         f"Number of stations and {_attname}s do not match."
                     )
-                if not isinstance(_att, np.ndarray):
-                    self.__setattr__(_attname, np.ndarray(_att.tolist()))
-
+                if not isinstance(_att, np.ndarray) and _attname != "attributes":
+                    try:
+                        self.__setattr__(_attname, np.ndarray(_att.tolist()))
+                    except Exception as e:
+                        print("+++++++++++++++++++++++++++++++++++++++++++++++")
+                        print(_attname, _att)
+                        print("+++++++++++++++++++++++++++++++++++++++++++++++")
+                        raise e
     def copy(self):
         return deepcopy(self)
 
@@ -81,7 +130,7 @@ class Meta:
         """
         if "origin" not in meta_dict:
             meta_dict["origin"] = None
-
+        
         return cls(
             starttime=meta_dict["starttime"],
             npts=meta_dict["npts"],
@@ -112,6 +161,37 @@ class Meta:
 
     def copy(self):
         return deepcopy(self)
+    
+    def write(self, filename):
+        with open(filename, "w") as f:
+            json.dump(self, f, cls=EnhancedJSONEncoder)
+
+    @classmethod
+    def read(cls, filename):
+        
+        with open(filename, "r") as f:
+            meta_dict = json.load(f)
+            
+            
+        print(meta_dict)
+        
+        if "origin" not in meta_dict or meta_dict["origin"] is None:
+            meta_dict["origin"] = None
+        else:
+            meta_dict["origin"] = obspy.UTCDateTime(meta_dict["origin"])
+        
+        print(meta_dict["stations"])
+        statdict = convert_to_ndarray(meta_dict["stations"], len(meta_dict["stations"]['codes']))
+        stations = Stations(**statdict)
+        
+        return cls(
+            starttime=meta_dict["starttime"],
+            npts=int(meta_dict["npts"]),
+            delta=float(meta_dict["delta"]),
+            components=meta_dict["components"],
+            stations=stations,
+            origin=meta_dict["origin"],
+        )
 
 #     def
 #         # Check overlapping stations

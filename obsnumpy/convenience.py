@@ -49,6 +49,8 @@ def preprocess(
     Dataset
 
     """
+    
+    st = st.copy()
 
     # Generic
     st.detrend("linear")
@@ -62,7 +64,29 @@ def preprocess(
         st.remove_response(
             inventory=inv, output=rr_output, pre_filt=pre_filt, water_level=water_level
         )
-        st.rotate("->ZNE", inventory=inv)
+        
+        # Get station codes
+        stations = set()
+        for tr in st:
+            station = (tr.stats.network, tr.stats.station)
+            stations.add(station)
+        
+        # Create a new stream to add rotated seismograms to
+        new_st = obspy.Stream()
+        
+        for station in stations:
+            st_temp = st.select(network=station[0], station=station[1])
+            
+            try:
+                st_temp.rotate("->ZNE", inventory=inv)
+                new_st += st_temp
+            except ValueError as e:
+                print(f"Error rotating seismograms for station {station}: {e}")
+        
+        print(f'Reduced stream length from {len(st)} to {len(new_st)}')
+        
+        # Reassign the stream
+        st = new_st
 
         for tr in st:
             station = inv.select(network=tr.stats.network, station=tr.stats.station)[0][
@@ -79,6 +103,15 @@ def preprocess(
 
     # Interpolate the seismograms
     if interpolate:
+        print(f"Interpolating seismograms to {sps} sps")
         st.interpolate(
             sampling_rate=sps, starttime=starttime, npts=int((length_in_s) * sps)
         )
+        
+        # Check whether all seismograms have the same length
+        for tr in st:
+            if len(tr.data) != int((length_in_s) * sps):
+                print(f"Seismogram {tr.id} has length {len(tr.data)}")
+            
+    return st
+                    

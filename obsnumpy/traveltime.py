@@ -117,7 +117,7 @@ def get_surface_wave_arrivals(dist_in_deg, vel, ncircles=1):
     return arrivals
 
 
-def select_traveltime_subset(ds: Dataset, mindist=30.0, maxdist=np.inf, component='Z', phase='P'):
+def select_traveltime_subset(ds: Dataset, mindist=30.0, maxdist=np.inf, component='Z', phase='P', gf=True, minwindow=300.0):
     """Selects subset of the array based on the distance range and component.
     And where we have a valid arrival time."""
 
@@ -139,14 +139,14 @@ def select_traveltime_subset(ds: Dataset, mindist=30.0, maxdist=np.inf, componen
         selection = selection & (~np.isnan(arrivals.anyS))
 
         if component in ['Z', 'R']:
-            selection = selection & (~np.isnan(arrivals.Rayleigh.min))
+            selection = selection & (~np.isnan(arrivals.Rayleigh.max))
         elif component == 'T':
-            selection = selection & (~np.isnan(arrivals.Love.min))
+            selection = selection & (~np.isnan(arrivals.Love.max))
         else:
             raise ValueError("Component must be Z, R or T")
 
     elif phase == 'S':
-        selection = selection & (~np.isnan(arrivals.P))
+        selection = selection & (~np.isnan(arrivals.S))
 
     elif phase == 'Rayleigh':
         selection = selection & (~np.isnan(arrivals.Rayleigh.min))
@@ -164,6 +164,13 @@ def select_traveltime_subset(ds: Dataset, mindist=30.0, maxdist=np.inf, componen
 
     else:
         raise ValueError("Component must be Z, R or T")
+    
+    # Get window lengths
+    start_arrivals, end_arrivals = get_windows(arrivals, phase=phase)
+    total_arrivals = end_arrivals - start_arrivals
+    
+    # only choose windows longer than minwindow
+    selection = selection & (total_arrivals > minwindow)
 
     # Get the indeces that match the selection
     idx = np.where(selection)[0]
@@ -210,8 +217,8 @@ def get_windows(arrivals, phase='P', window=200.0):
 
     elif phase == 'P':
 
-        start_arrivals = arrivals.P
-        end_arrivals = start_arrivals + window
+        start_arrivals = arrivals.anyP
+        end_arrivals = np.minimum(start_arrivals + window, arrivals.anyS)
 
     elif phase == 'Strain':
 
@@ -220,17 +227,41 @@ def get_windows(arrivals, phase='P', window=200.0):
 
     elif phase == 'S':
 
-        start_arrivals = arrivals.S
-        end_arrivals = start_arrivals + window
+        start_arrivals = arrivals.anyS
+        end_arrivals = np.minimum(start_arrivals + window, arrivals.Love.max)
 
     elif phase == 'body':
 
         start_arrivals = arrivals.anyP - 200
         end_arrivals = arrivals.Love.max
+    else:
+        raise ValueError("Phase not recognized")
 
     return start_arrivals, end_arrivals
 
+def get_max_window(arrivals, phase='P', window=200.0):
+    
+    starts, ends = get_windows(arrivals, phase=phase, window=window)
+    
+    return np.max(ends - starts)
 
+def get_mean_window(arrivals, phase='P', window=200.0):
+    
+    starts, ends = get_windows(arrivals, phase=phase, window=window)
+    
+    return np.mean(ends - starts)
+
+def get_median_window(arrivals, phase='P', window=200.0):
+    
+    starts, ends = get_windows(arrivals, phase=phase, window=window)
+    
+    return np.median(ends - starts)
+
+def get_min_window(arrivals, phase='P', window=200.0):
+    
+    starts, ends = get_windows(arrivals, phase=phase, window=window)
+    
+    return np.min(ends - starts)
 
 def construct_taper(npts, taper_type="tukey", alpha=0.2):
     """
@@ -258,9 +289,13 @@ def construct_taper(npts, taper_type="tukey", alpha=0.2):
     return taper
 
 
-def taper_dataset(ds: Dataset, phase, tshift, taper_perc=0.5):
+def taper_dataset(ds: Dataset, phase, tshift, taper_perc=0.5, gf_shift=0.0, return_taper=False):
 
     outds = ds.copy()
+    
+    if return_taper:
+        taperds = ds.copy()
+        
     # Get sampling interval
     delta = outds.meta.delta
     npts = outds.meta.npts
@@ -272,11 +307,26 @@ def taper_dataset(ds: Dataset, phase, tshift, taper_perc=0.5):
 
     # Get the taper based on the window
     outds.data = np.zeros_like(ds.data)
+    
+    # Construct taper array
+    if return_taper:
+        taperds.data = np.zeros_like(ds.data)
 
     for _i, (_start, _end) in enumerate(zip(start_arrival, end_arrival)):
-        print(_end - _start)
-        idx = np.where((_start <= t) & (t <= _end))[0]
+        # print(_end - _start)
+        idx = np.where((_start + gf_shift <= t) & (t <= _end + gf_shift))[0]
         npts = len(idx)
-        outds.data[_i, 0, idx] = ds.data[_i, 0, idx] * construct_taper(npts, taper_type="tukey", alpha=taper_perc)
+        
+        # Construct taper
+        taper = construct_taper(npts, taper_type="tukey", alpha=taper_perc)
+        
+        # Store the taper array
+        if return_taper:
+            taperds.data[_i, 0, idx] = taper
+            
+        outds.data[_i, 0, idx] = ds.data[_i, 0, idx] * taper
 
-    return outds
+    if return_taper:
+        return outds, taperds
+    else:
+        return outds

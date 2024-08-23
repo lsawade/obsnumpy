@@ -153,9 +153,6 @@ class Dataset:
             latitudes = None
             longitudes = None
 
-
-
-        print(latitudes, longitudes)
         # Compute Geometry if the event latitude and longitude are set and
         # station latitudes and longitudes are set
         if (event_latitude is not None and event_longitude is not None) and (
@@ -508,6 +505,13 @@ class Dataset:
         # Compute the convolution between the wavelet and the data
         self.data = convolve.convolve(self.data, wavelet, self.meta.delta, tshift)
 
+    def convolve_trace(self, idx, wavelet: np.ndarray, tshift: float = 0.0):
+        """The expectation is that the wavelet is at the same sampling rate as,
+        as the data. The wavelet should be a 1D numpy array."""
+
+        # Compute the convolution between the wavelet and the data
+        self.data[idx:idx+1, :, :] = convolve.convolve(self.data[idx:idx+1, :, :], wavelet, self.meta.delta, tshift)
+
     def compute_geometry(self, event_latitude, event_longitude):
         """Compute the geometry of the stations with respect to the event. This
         function will compute the azimuth, distance, and back azimuth of each
@@ -540,7 +544,8 @@ class Dataset:
 
     def subset(self, stations=None, components=None) -> Dataset:
         """Given a set of indeces this function will create a new dataset with.
-        only the selected stations."""
+        only the selected stations. To reindex the additional attributes for 
+        stations, please use the stations.attributes dictionary!!"""
 
         new_meta = self.meta.copy()
 
@@ -564,12 +569,23 @@ class Dataset:
             if isinstance(stations, int):
                 ids = slice(stations, stations + 1)
 
+            elif isinstance(stations, np.ndarray):
+                ids = stations
+                
             elif len(stations) == 1:
                 ids = slice(stations, stations + 1)
-
+                
+            elif isinstance(stations, str):
+                
+                try:
+                    idx = list(self.meta.stations.codes).index(stations)
+                    ids = slice(idx, idx + 1)
+                except ValueError as e:
+                    print(e)
+                    return
             else:
                 ids = stations
-
+ 
             # Reindex the input metadata
             new_meta = utils.reindex(new_meta, ids, len(self), debug=False)
 
@@ -596,6 +612,30 @@ class Dataset:
     @property
     def t(self):
         return np.arange(0, self.meta.npts * self.meta.delta, self.meta.delta)
+    
+    def write(self, datafilename: str, metafilename: str):
+        
+        # Writing t
+        print(f"Writing metadata to: {metafilename}")
+        self.meta.write(metafilename)
+        
+        print(f"Writing data to: {datafilename}")
+        np.save(datafilename, self.data)
+    
+    @classmethod
+    def read(cls, datafilename: str, metafilename: str):
+            
+        # Reading metadata
+        print(f"Reading metadata from: {metafilename}")
+        meta = Meta.read(metafilename)
+            
+        print(f"Reading data from: {datafilename}")
+        data = np.load(datafilename)
+    
+        return cls(data=data, meta=meta)
+    
+    def write_npy(self, filename: str, format: str = "NPY"):
+        pass      
 
     def intersection(self, other: Dataset) -> tp.Tuple[Dataset, Dataset]:
         """You did well copilot!"""
