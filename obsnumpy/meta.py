@@ -7,24 +7,6 @@ import json
 
 # from .utils import reindex_dataclass
 
-def convert_to_ndarray(d: dict, length: int) -> dict:
-    """This function convertes every ``list`` entry of a ``dict`` of a given length to a numpy array.
-    This is used to load a dictionary from a json file and convert it to a dictionary of numpy arrays.
-    Unless it's a list 
-    """
-    
-    for key, value in d.items():
-        if isinstance(value, list):
-            # Only convert numeric lists
-            if len(value) == length and isinstance(value[0], (int, float)):
-                d[key] = np.array(value)
-            else:
-                pass
-        elif isinstance(value, dict):
-            d[key] = convert_to_ndarray(value, length)
-            
-    return d
-
 
 class EnhancedJSONEncoder(json.JSONEncoder):
     def default(self, o):
@@ -44,6 +26,24 @@ class EnhancedJSONEncoder(json.JSONEncoder):
             
         return super().default(o)
 
+
+def convert_to_ndarray(d: dict, length: int) -> dict:
+    """This function convertes every ``list`` entry of a ``dict`` of a given length to a numpy array.
+    This is used to load a dictionary from a json file and convert it to a dictionary of numpy arrays.
+    Unless it's a list 
+    """
+    
+    for key, value in d.items():
+        if isinstance(value, list):
+            # Only convert numeric lists
+            if len(value) == length and isinstance(value[0], (int, float)):
+                d[key] = np.array(value)
+            else:
+                pass
+        elif isinstance(value, dict):
+            d[key] = convert_to_ndarray(value, length)
+            
+    return d
 
 class AttrDict(dict):
     """Dictionary to store attributes for a dataset."""
@@ -172,16 +172,28 @@ class Meta:
         with open(filename, "r") as f:
             meta_dict = json.load(f)
             
-            
-        print(meta_dict)
-        
         if "origin" not in meta_dict or meta_dict["origin"] is None:
             meta_dict["origin"] = None
         else:
             meta_dict["origin"] = obspy.UTCDateTime(meta_dict["origin"])
+            
+        # Fix the starttime
+        meta_dict["starttime"] = obspy.UTCDateTime(meta_dict["starttime"])
         
-        print(meta_dict["stations"])
+        # Make lists in the stations dictionary into numpy arrays
         statdict = convert_to_ndarray(meta_dict["stations"], len(meta_dict["stations"]['codes']))
+        
+        # Make attribute dictionary into AttrDict        
+        if "attributes" in statdict and statdict["attributes"] is not None:
+            __att = AttrDict()
+            __att.update(statdict['attributes'])
+            statdict['attributes'] = __att
+        
+        # Fix origin in station dictionary if it exists
+        if "origin_time" in statdict["attributes"] and statdict["attributes"]["origin_time"] is not None:
+            statdict["attributes"]["origin_time"] = obspy.UTCDateTime(statdict["attributes"]["origin_time"])
+    
+        # Create station object
         stations = Stations(**statdict)
         
         return cls(

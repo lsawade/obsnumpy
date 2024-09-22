@@ -4,10 +4,31 @@ import typing as tp
 import datetime
 import obspy
 from obspy.geodetics.base import gps2dist_azimuth
-
+import json
+import dataclasses
 from dataclasses import fields, is_dataclass
 from .meta import AttrDict
 from . import traveltime as tt
+
+
+class EnhancedJSONEncoder(json.JSONEncoder):
+    def default(self, o):
+        try:
+            if isinstance(o, AttrDict):
+                return o.to_dict()
+            elif isinstance(o, np.ndarray):
+                return o.tolist()
+            elif isinstance(o, obspy.UTCDateTime):
+                return o.isoformat()
+            elif dataclasses.is_dataclass(o):
+                return dataclasses.asdict(o)
+        except TypeError as e:
+            print(o)
+            print(e)
+            raise e
+            
+        return super().default(o)
+
 
 def log(msg):
     length = 80
@@ -256,21 +277,21 @@ def remove_misfits(obs, syn, misfit_quantile_threshold=0.975, ratio_quantile_thr
         return obs, syn, np.arange(len(obs))
     
     # Get the threshold
-    misfit_threshold = np.quantile(misfit, misfit_quantile_threshold)
+    misfit_threshold = np.quantile(misfit[np.isfinite(misfit)], misfit_quantile_threshold)
     
     # Print some statistics and the threshold
-    log(f"Min, Mean, Median, Max misfit: {np.min(misfit):.2f}, {np.mean(misfit):.2f}, {np.median(misfit):.2f}, {np.max(misfit):.2f}")
+    log(f"Min, Mean, Median, Max misfit: {np.min(misfit[np.isfinite(misfit)]):.2f}, {np.mean(misfit[np.isfinite(misfit)]):.2f}, {np.median(misfit[np.isfinite(misfit)]):.2f}, {np.max(misfit[np.isfinite(misfit)]):.2f}")
     log(f"Misfit threshold: {misfit_threshold:.2f}")
     
     # Removal of anomalously low or large data traces
     ratio = np.sum(syn.data**2,axis=-1) / np.sum(obs.data**2,axis=-1)
     
     # Get ratio threshold
-    ratio_threshold_above = np.quantile(ratio, ratio_quantile_threshold_above)
-    ratio_threshold_below = np.quantile(ratio, ratio_quantile_threshold_below)
+    ratio_threshold_above = np.quantile(ratio[np.isfinite(ratio)], ratio_quantile_threshold_above)
+    ratio_threshold_below = np.quantile(ratio[np.isfinite(ratio)], ratio_quantile_threshold_below)
     
     
-    log(f"Min, Mean, Median, Max ratio: {np.min(ratio):.2f}, {np.mean(ratio):.2f}, {np.median(ratio):.2f}, {np.max(ratio):.2f}")
+    log(f"Min, Mean, Median, Max ratio: {np.min(ratio[np.isfinite(ratio)]):.2f}, {np.mean(ratio[np.isfinite(ratio)]):.2f}, {np.median(ratio[np.isfinite(ratio)]):.2f}, {np.max(ratio[np.isfinite(ratio)]):.2f}")
     log(f"Ratio thresholds: {ratio_threshold_below:.2f} -- {ratio_threshold_above:.2f}")
     
     # Get indices
@@ -300,3 +321,183 @@ def remove_zero_traces(ds):
     idx = np.array(idx, dtype=int)
     
     return ds.subset(stations=idx)
+
+
+def azimuthal_weights(az, weights=None, nbins=12, p=1):
+    
+    # Create the bins
+    bins = np.arange(0, 360.1, 360/nbins)
+
+    # Histogram
+    H, _ = np.histogram(az, bins=bins, weights=weights)
+
+    # Find which az is in which bin
+    binass = np.digitize(az, bins) - 1
+
+    # Compute weights
+    w = (1/H[binass])**p
+
+    # Normalize
+    w /= np.mean(w)
+
+    return w
+
+
+def xcorr(d, s):
+    cc = np.correlate(d, s, mode="full")
+    time_shift = cc.argmax() - len(d) + 1
+    # Normalized cross correlation.
+    max_cc_value = cc.max() / np.sqrt((s ** 2).sum() * (d ** 2).sum())
+    return max_cc_value, time_shift
+
+
+def correct_window_index(istart, iend, nshift, npts):
+    """Correct the window index based on cross-correlation shift
+
+    Parameters
+    ----------
+    istart : int
+        start index
+    iend : int
+        end index
+    nshift : int
+        shift in N samples
+    npts : int
+        Length of window
+
+    Returns
+    -------
+    Tuple
+        indeces
+
+    Raises
+    ------
+    ValueError
+        If resulting windows arent the same length? I don't get this
+    """
+    
+    istart_d = max(1, istart + nshift)
+    iend_d = min(npts, iend + nshift)
+    istart_s = max(1, istart_d - nshift)
+    iend_s = min(npts, iend_d - nshift)
+    if (iend_d - istart_d) != (iend_s - istart_s):
+        raise ValueError("After correction, window length not the same: "
+                         "[%d, %d] and [%d, %d]" % (istart_d, iend_d,
+                                                    istart_s, iend_s))
+    return istart_d, iend_d, istart_s, iend_s
+
+
+def window_measurements(obs, syn, phase='Strain', dict_only=False):
+    # Function assumes azimuths are set in the meta data, so are windows
+    
+    starts, ends = tt.get_windows(obs.meta.stations.attributes.arrivals, phase=phase)
+    shift = obs.meta.stations.attributes.origin_time - obs.meta.starttime 
+    t = obs.t - shift
+    
+    # Add attributes as numpy array
+    N = len(obs.data)
+    
+    # Make new array
+    measurements = AttrDict()
+    
+    # Add attributes We use lists, because sometimes the windows (if not sanity checked) can be 0 length
+    # for surface waves with large epicentral distance and limited time in the trace
+    measurements.corr_ratio = []
+    measurements.dlna = []
+    measurements.L1 = []
+    measurements.L2 = []
+    measurements.maxcc = []
+    measurements.obs_energy = []
+    measurements.syn_energy = []
+    measurements.L1_power = []
+    measurements.L2_power = []
+    measurements.nshift = []
+    measurements.time_shift = []
+    
+    
+    for _i, (_obs, _syn, _start, _end) in enumerate(zip(obs.data[:, 0, :], syn.data[:, 0, :], starts, ends)):
+        
+        # Get start and end indeces
+        istart = np.argmin(np.abs(t - _start))
+        iend = np.argmin(np.abs(t - _end))
+        
+        # Get windows
+        wd = _obs[istart:iend]
+        ws = _syn[istart:iend]
+        
+        if len(wd) < 15 or len(ws) < 15:
+            print(f"Window for {obs.meta.stations.codes[_i]} has less than 15 samples. Skipping.")
+            continue
+        
+        # Taper the windows
+        tap = tt.construct_taper(len(wd), alpha=0.1)
+        wd *= tap
+        ws *= tap
+        
+        # Compute the cross-correlation
+        maxcc, nshift = xcorr(wd, ws)
+        
+        # Get fixed window indeces.
+        istart_d, iend_d, istart_s, iend_s = correct_window_index(istart, iend, nshift, obs.meta.npts)
+        
+        # Get fixed windows
+        wd_fix = _obs[istart_d:iend_d]
+        ws_fix = _syn[istart_s:iend_s]
+        
+        # Taper the fixed windows
+        tap = tt.construct_taper(len(wd_fix), alpha=0.05)
+        wd_fix *= tap
+        ws_fix *= tap
+        
+        
+        # Compute the L1 and L2 norms
+        L1 = np.sum(np.abs(wd_fix - ws_fix))
+        L2 = np.sum((wd_fix - ws_fix)**2)
+        
+        # Compute the energy of the traces
+        obs_energy = np.sum(wd_fix**2)
+        syn_energy = np.sum(ws_fix**2)
+        
+        # Compute the power of the traces
+        L1_power = L1/np.sqrt(obs_energy)
+        L2_power = L2/obs_energy
+        
+        # Compute the correlation ratio
+        corr_ratio = np.sum(wd_fix * ws_fix)/np.sum(ws_fix ** 2)
+        
+        # Compute dlna
+        dlna = .5 * np.log(np.sum(wd_fix**2)/np.sum(ws_fix**2))
+        
+        # Store the values in the meta data
+        measurements.corr_ratio.append(corr_ratio)
+        measurements.dlna.append(dlna)
+        measurements.L1.append(L1)
+        measurements.L2.append(L2)
+        measurements.obs_energy.append(obs_energy)
+        measurements.syn_energy.append(syn_energy)
+        measurements.L1_power.append(L1_power)
+        measurements.L2_power.append(L2_power)
+        measurements.maxcc.append(maxcc)
+        measurements.nshift.append(nshift)
+        measurements.time_shift.append(nshift*obs.meta.delta)
+        
+    
+    # Convert all lists to numpy arrays
+    for key, value in measurements.items():
+        measurements[key] = np.array(value)
+        
+    if dict_only:
+        return measurements
+    else:
+        obs.meta.stations.attributes.measurements = measurements
+        return measurements
+    
+    
+def save_json(d, filename):
+    with open(filename, "w") as f:
+        json.dump(d, f, cls=EnhancedJSONEncoder)
+
+def load_json(filename):
+    with open(filename, "r") as f:
+        d = json.load(f)
+    return d

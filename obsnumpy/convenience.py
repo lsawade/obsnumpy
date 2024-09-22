@@ -104,9 +104,18 @@ def preprocess(
     # Interpolate the seismograms
     if interpolate:
         print(f"Interpolating seismograms to {sps} sps")
-        st.interpolate(
-            sampling_rate=sps, starttime=starttime, npts=int((length_in_s) * sps)
-        )
+        new_st = obspy.Stream()
+        
+        for tr in st:
+            try:    
+                tr.interpolate(
+                    sampling_rate=sps, starttime=starttime, npts=int((length_in_s) * sps)
+                )
+                new_st += tr
+            except ValueError as e:
+                print(f"Error interpolating seismogram {tr.id}: {e}")
+            
+        st = new_st
         
         # Check whether all seismograms have the same length
         for tr in st:
