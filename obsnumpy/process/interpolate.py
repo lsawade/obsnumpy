@@ -50,7 +50,6 @@ def interp1d(
     # Setup new time vector
     t0_new = new_start - old_start
     tnew = np.arange(t0_new, new_npts * new_dt + t0_new, new_dt)
-    print("New time vector:", len(tnew))
 
     # Interpolate
     if itype == "linear":

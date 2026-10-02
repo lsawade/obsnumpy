@@ -110,7 +110,6 @@ def taper(
     current_module = sys.modules[__name__]
     current_callables = dict(inspect.getmembers(current_module, inspect.isfunction))
     for key, value in current_callables.items():
-        print(key)
         if callable(value) and value.__module__ == __name__ and key == f"_{type}":
             func = value
             break
