@@ -30,6 +30,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gpu = ["cupy-cuda13x"]
+test = ["pytest"]
 docs = [
     "sphinx<6.0",
     "furo",
@@ -64,3 +66,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools_scm]
 write_to = "obsnumpy/_version.py"
 version_scheme = "release-branch-semver"
+
+[tool.pytest.ini_options]
+markers = [
+    "gpu: needs CuPy and a CUDA device (skipped otherwise)",
+    "production: needs obsproclib or cmt3d importable (skipped otherwise)",
+]

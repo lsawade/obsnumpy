@@ -100,10 +100,42 @@ def taper(
     ``'triang'``
         Triangular window. (uses: :func:`scipy.signal.windows.triang`)
     """
+    # Convert data if it's not a floating point type.
+    if not np.issubdtype(data.dtype, np.floating):
+        data = np.require(data, dtype=np.float64)
+
+    # Apply taper to specified axis
+    data *= taper_window(
+        data.shape[-1],
+        max_percentage,
+        sampling_rate,
+        type=type,
+        max_length=max_length,
+        side=side,
+        **kwargs,
+    )
+    return data
+
+
+def taper_window(
+    npts,
+    max_percentage,
+    sampling_rate=None,
+    type="cosine",
+    max_length=None,
+    side="both",
+    **kwargs,
+):
+    """The window that :func:`taper` multiplies a trace of ``npts`` samples by.
+
+    The same window as :meth:`obspy.core.trace.Trace.taper`; for
+    ``type="cosine"`` obspy's ``p = 1`` convention (the ramp reaches 1 at
+    sample ``wlen - 1``). ``sampling_rate`` is needed only with
+    ``max_length``. Returns a float64 array of length ``npts``.
+    """
     type = type.lower()
     side = side.lower()
     side_valid = ["both", "left", "right"]
-    npts = data.shape[-1]
     if side not in side_valid:
         raise ValueError("'side' has to be one of: %s" % side_valid)
     # retrieve function call from entry points
@@ -159,13 +191,7 @@ def taper(
             )
         )
 
-    # Convert data if it's not a floating point type.
-    if not np.issubdtype(data.dtype, np.floating):
-        data = np.require(data, dtype=np.float64)
-
-    # Apply taper to specified axis
-    data *= taper[..., :]
-    return data
+    return taper
 
 
 def _cosine(npts, p=0.1, freqs=None, flimit=None, halfcosine=True, sactaper=False):

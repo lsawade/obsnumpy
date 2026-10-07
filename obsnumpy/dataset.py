@@ -498,6 +498,17 @@ class Dataset:
             **kwargs,
         )
 
+    def apply(self, pipeline) -> Dataset:
+        """Run an :class:`obsnumpy.pipeline.Pipeline` on the data, in place.
+
+        The metadata follow the steps: ``delta``, ``npts``, ``starttime`` (from
+        ``Cut`` and ``Interpolate``) and ``components`` (from ``RotateNE2RT``).
+        Returns the dataset.
+        """
+        from .pipeline import apply_to_dataset
+
+        return apply_to_dataset(self, pipeline)
+
     def convolve(self, wavelet: np.ndarray, tshift: float = 0.0):
         """The expectation is that the wavelet is at the same sampling rate as,
         as the data. The wavelet should be a 1D numpy array."""
