@@ -245,7 +245,7 @@ class Dataset:
         if not isinstance(st, obspy.Stream):
             raise ValueError("Input data must be an Obspy Stream.")
 
-        if interpolate not in kwargs:
+        if "interpolate" not in kwargs:
             kwargs["interpolate"] = True
         else:
             if kwargs["interpolate"] is False:
@@ -270,8 +270,8 @@ class Dataset:
                             "If interpolate is explicitly set to False, all traces must have the same starttime."
                         )
 
-        # Preprocess stream
-        preprocess(st, *args, **kwargs)
+        # Preprocess stream (preprocess works on a copy and returns it)
+        st = preprocess(st, *args, **kwargs)
 
         # Get inv if it is in kwargs
         if "inv" in kwargs:

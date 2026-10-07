@@ -51,7 +51,7 @@ def test_preprocess_no_interpolation():
     print(length_in_s, sampling_rate, npts)
 
     # Preprocess the stream
-    preprocess(
+    pst = preprocess(
         pst,
         starttime=origin.time,
         length_in_s=length_in_s,
@@ -113,7 +113,7 @@ def test_preprocess_interpolation():
     print(length_in_s, sampling_rate, npts)
 
     # Preprocess the stream
-    preprocess(
+    pst = preprocess(
         pst,
         starttime=origin.time,
         length_in_s=length_in_s,
