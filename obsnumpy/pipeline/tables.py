@@ -19,6 +19,7 @@ import scipy.sparse as ssp
 
 from ..process import filter as _filter
 from ..process import taper as _taper
+from .backend import xp_of
 
 
 def _frozen(a):
@@ -102,20 +103,28 @@ _DSINC_SERIES = [(-1) ** k * 2 * k / float(np.prod(np.arange(1, 2 * k + 2)))
 
 
 def dsinc(u):
-    """The derivative of ``np.sinc``: ``(cos(pi u) - sinc(u)) / u``, and its
-    Taylor series near 0, where that form loses digits."""
-    u = np.asarray(u, dtype=np.float64)
-    out = np.empty_like(u)
-    small = np.abs(u) < 0.1
-    us = u[small]
-    z = (np.pi * us) ** 2
-    acc = np.zeros_like(us)
+    """The derivative of ``sinc``: ``(cos(pi u) - sinc(u)) / u``, and its
+    Taylor series near 0, where that form loses digits. numpy or CuPy."""
+    xp = xp_of(u)
+    u = xp.asarray(u, dtype=xp.float64)
+    small = xp.abs(u) < 0.1
+    z = (np.pi * u) ** 2
+    acc = xp.zeros_like(u)
     for c in reversed(_DSINC_SERIES):
         acc = acc * z + c
-    out[small] = np.pi ** 2 * us * acc
-    ub = u[~small]
-    out[~small] = (np.cos(np.pi * ub) - np.sinc(ub)) / ub
-    return out
+    safe = xp.where(small, 1.0, u)
+    return xp.where(small, np.pi ** 2 * u * acc, (xp.cos(np.pi * u) - xp.sinc(u)) / safe)
+
+
+def lanczos_kernel(d, a: int, deriv: int = 0):
+    """obspy's Lanczos kernel ``K(d) = sinc(d) * sinc(d / a)`` at offsets ``d``
+    (in samples), or with ``deriv=1`` its derivative ``K'(d)``. numpy or CuPy."""
+    xp = xp_of(d)
+    if deriv == 0:
+        return xp.sinc(d) * xp.sinc(d / a)
+    if deriv == 1:
+        return dsinc(d) * xp.sinc(d / a) + xp.sinc(d) * dsinc(d / a) / a
+    raise ValueError("deriv must be 0 or 1")
 
 
 @lru_cache(maxsize=32)
@@ -139,12 +148,9 @@ def lanczos_matrix(n_in: int, old_dt: float, offset_s: float, new_dt: float, n_o
     i0 = np.floor(x).astype(np.int64)
     taps = i0[:, None] + np.arange(-a + 1, a + 1)[None, :]
     d = x[:, None] - taps
-    if deriv == 0:
-        w = np.sinc(d) * np.sinc(d / a)
-    elif deriv == 1:
-        w = (dsinc(d) * np.sinc(d / a) + np.sinc(d) * dsinc(d / a) / a) / old_dt
-    else:
-        raise ValueError("deriv must be 0 or 1")
+    w = lanczos_kernel(d, a, deriv)
+    if deriv == 1:
+        w = w / old_dt
     ok = (taps >= 0) & (taps < n_in)
     rows = np.broadcast_to(np.arange(n_out)[:, None], taps.shape)
     L = ssp.csr_matrix((w[ok], (rows[ok], taps[ok])), shape=(n_out, n_in))

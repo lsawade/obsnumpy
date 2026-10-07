@@ -74,6 +74,37 @@ def _scale(d, dt, tapers, weights, normalize):
     return weights / np.where(N != 0.0, N, 1.0)
 
 
+_FUSED = {}
+
+
+def _fused(cp):
+    """One-pass CuPy kernels for the cost's summand and the residual weight."""
+    if "sq" not in _FUSED:
+        _FUSED["sq"] = cp.ElementwiseKernel(
+            "T s, T d, T w", "T c", "c = w * (s - d) * (s - d)", "obsnumpy_weighted_sq")
+        _FUSED["rw"] = cp.ElementwiseKernel(
+            "T s, T d, T w, T dt", "T r", "r = w * (s - d) * dt", "obsnumpy_residual_weight")
+    return _FUSED
+
+
+def weighted_cost(s, d, omega, dt):
+    """``1/2 sum omega (s - d)^2 dt`` over the last three axes."""
+    xp = xp_of(s)
+    if xp is np:
+        r = s - d
+        return 0.5 * dt * (omega * r * r).sum(axis=(-3, -2, -1))
+    sq = _fused(xp)["sq"](s, d, omega)          # one pass, then CuPy's reduction
+    return 0.5 * dt * sq.reshape(sq.shape[:-3] + (-1,)).sum(axis=-1)
+
+
+def weighted_residual(s, d, omega, dt):
+    """``omega (s - d) dt``, the shape of ``s``."""
+    xp = xp_of(s)
+    if xp is np:
+        return omega * (s - d) * dt
+    return _fused(xp)["rw"](s, d, omega, xp.float64(dt))
+
+
 @dataclasses.dataclass
 class WindowedMisfit:
     """The misfit, with all its data-side weights collected into ``omega``.
@@ -144,14 +175,13 @@ class WindowedMisfit:
     def cost(self, s):
         """``C(s)``: a float, or an array over the leading (batch) axes."""
         xp = xp_of(s)
-        r = s - self._on(xp, "d")
-        c = 0.5 * self.dt * (self._on(xp, "omega") * r * r).sum(axis=(-3, -2, -1))
+        c = weighted_cost(s, self._on(xp, "d"), self._on(xp, "omega"), self.dt)
         return float(c) if c.ndim == 0 else c
 
     def residual_weight(self, s):
         """``dC/ds = omega (s - d) dt``, the shape of ``s``."""
         xp = xp_of(s)
-        return self._on(xp, "omega") * (s - self._on(xp, "d")) * self.dt
+        return weighted_residual(s, self._on(xp, "d"), self._on(xp, "omega"), self.dt)
 
     def gradient(self, s, J):
         """``dC/dm = <dC/ds, J_m>`` for ``J`` of shape ``(..., nparam, nsta, ncomp,

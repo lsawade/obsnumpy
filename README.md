@@ -241,3 +241,93 @@ cost and gradient. The two differ on the tapers' ramps, by a few percent of
 `H`; the gradient, and so the minimum, are the same.
 `gauss_newton(J, like_cmt3d=True)` reproduces cmt3d's, given
 `tapers_sq=windows_to_tapers(..., power=2)` at build time.
+
+
+## Linear basis model
+
+`obsnumpy.linear_model` is a forward model for synthetics that are linear in a
+basis, with its adjoint gradient and its Jacobian, batched over chains:
+
+    v = scale * U W                  contraction (one GEMM over the chains)
+    y = S(tau) v                     Lanczos onto the data's FixedWindow
+    s = Rot P y                      the data's processing, compiled into P
+    C = misfit.cost(s)
+
+W can be a moment tensor contracted with strain Green functions, a force,
+or weights on precomputed elementary seismograms. The caller maps its
+parameters to W, and maps `dC/dW` back through its own `dW/dtheta`.
+
+- `Basis(U, t0, dt, scale)`: `U` is `(nrec, ncomp, nt, nbasis)`, float32 by
+  default; everything after the contraction is float64.
+- `BasisStore(fill, max_items, max_bytes, xp)`: an LRU of bases on one device,
+  filled on demand, with hit, miss and eviction counts.
+- `LinearBasisModel(window, processing, rotation, misfit)`:
+  - `forward(basis, W, tau)` returns `s` and `C`;
+  - `gradient(...)` returns `C`, `dC/dW` and `dC/dtau`, by the adjoint
+    `S^T P^T Rot^T dC/ds`;
+  - `jacobian(..., dW)` returns `s` and the processed derivatives along the
+    caller's weight directions, plus `tau`.
+
+  `W` is `(K, nbasis)` and `tau` `(K,)`, one row per chain. A `tau` beyond
+  what the basis covers raises; it does not silently zero-fill.
+- `Basis.rotated(RotateNE2RT(baz))`: the rotation commutes with the rest, so
+  a basis rotated once at fill time, with `rotation=None`, saves a rotation
+  per evaluation.
+
+```python
+import numpy as np
+from obsnumpy.linear_model import Basis, BasisStore, LinearBasisModel
+from obsnumpy.misfit import WindowedMisfit, windows_to_tapers
+from obsnumpy.pipeline import (Pipeline, Detrend, Taper, PreFilt, Interpolate, FixedWindow,
+                               RotateNE2RT)
+
+rng = np.random.default_rng(0)
+nrec, nt, nbasis, dt = 20, 917, 375, 3.92
+baz = rng.uniform(0, 360, nrec)
+
+def fill(key):
+    """The caller's: build the basis for `key` (here random), rotated once."""
+    U = rng.standard_normal((nrec, 3, nt, nbasis), dtype=np.float32)
+    return Basis(U=U, t0=-200.0, dt=dt, scale=np.ones(nrec)).rotated(RotateNE2RT(baz))
+
+window = FixedWindow.from_trim(-200.0, dt, 100.0, 3300.0, pad_samples=5)   # the data's cut
+processing = Pipeline([Detrend("linear"), Detrend("demean"), Taper(0.05),
+                       PreFilt((0.003, 0.004, 0.0111, 0.0139)),
+                       Detrend("linear"), Detrend("demean"), Taper(0.05),
+                       Interpolate(2.0, 1601, 100.0 - window.first_time)])
+d = rng.standard_normal((nrec, 3, 1601))                                   # processed data, RTZ
+wins = [[[(200, 600)]] * 3 for _ in range(nrec)]
+misfit = WindowedMisfit.build(d, 2.0, windows_to_tapers(wins, 1601))
+model = LinearBasisModel(window, processing, rotation=None, misfit=misfit)
+store = BasisStore(fill, max_items=4)
+
+basis = store.get("element 1985")
+W = rng.standard_normal((8, nbasis))                     # 8 chains
+tau = rng.uniform(-5, 5, 8)                              # their time shifts [s]
+s, C = model.forward(basis, W, tau)                      # (8, nrec, 3, 1601), (8,)
+C, dC_dW, dC_dtau = model.gradient(basis, W, tau)        # (8,), (8, nbasis), (8,)
+s, J = model.jacobian(basis, W, tau, dW=rng.standard_normal((8, 9, nbasis)))  # J: (8, 10, ...)
+```
+
+On the GPU, `S(tau)` and its adjoint are small CUDA kernels. When the window's
+sampling interval is the basis's, or an integer multiple of it, the tap
+weights depend on the chain only and are computed on the host.
+
+**Measured** (`scripts/benchmark_linear_model.py`): a basis the size of one
+gf3d element for cmt3d, 142 x 3 x 917 x 375 float32 (0.59 GB); the cmt3d
+window and chain; the basis rotated once. One socket of an Intel Xeon Gold
+6548Y+ (`numactl` on the GPU's NUMA node), and an NVIDIA H100 NVL. Per call,
+wall time:
+
+| | forward | gradient | jacobian (9 + tau) |
+|---|---|---|---|
+| CPU, 1 thread, K = 1 | 61 ms | 143 ms | 410 ms |
+| CPU, 32 threads, K = 1 | 17 ms | 60 ms | 212 ms |
+| GPU, K = 1 | 0.43 ms | 0.79 ms | 0.95 ms |
+| GPU, K = 64, per evaluation | 69 us | 146 us | 695 us |
+
+At K = 64 most of an evaluation is the float64 processing GEMM: `P` maps 827
+window samples to 1601 for each of 426 traces, about 34 us at 33 TFLOP/s.
+The contraction is 13 us. `prune=True` drops `P`'s columns outside every
+window. It changes no result, but it saves nothing when the traces' windows
+jointly cover the record.

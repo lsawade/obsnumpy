@@ -461,6 +461,16 @@ class RotateNE2RT(Step):
         out[..., self.e, :] = -e * c + n * s
         return out
 
+    def matrices(self, nsta, ncomp=3):
+        """The rotation as one ``(ncomp, ncomp)`` matrix per station,
+        ``(nsta, ncomp, ncomp)``: ``out[i] = M[i] @ in[i]`` over components."""
+        b = np.radians(np.broadcast_to(np.asarray(self.baz, dtype=np.float64), (nsta,)))
+        M = np.broadcast_to(np.eye(ncomp), (nsta, ncomp, ncomp)).copy()
+        n, e = self.n, self.e
+        M[:, n, n], M[:, n, e] = -np.cos(b), -np.sin(b)
+        M[:, e, n], M[:, e, e] = np.sin(b), -np.cos(b)
+        return M
+
     def adjoint(self, g, dt, npts):
         """The inverse rotation (the rotation is orthogonal)."""
         xp = xp_of(g)
