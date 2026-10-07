@@ -95,16 +95,43 @@ def lanczos_positions(n_out: int, old_dt: float, offset_s: float, new_dt: float)
     return offset_s / old_dt + np.arange(n_out) * (new_dt / old_dt)
 
 
+# d/du sinc(u) = sum_{k>=1} (-1)^k 2k pi^(2k) u^(2k-1) / (2k+1)!, as pi^2 u times a
+# polynomial in z = (pi u)^2; used for |u| < 0.1, where the closed form cancels.
+_DSINC_SERIES = [(-1) ** k * 2 * k / float(np.prod(np.arange(1, 2 * k + 2)))
+                 for k in range(1, 8)]
+
+
+def dsinc(u):
+    """The derivative of ``np.sinc``: ``(cos(pi u) - sinc(u)) / u``, and its
+    Taylor series near 0, where that form loses digits."""
+    u = np.asarray(u, dtype=np.float64)
+    out = np.empty_like(u)
+    small = np.abs(u) < 0.1
+    us = u[small]
+    z = (np.pi * us) ** 2
+    acc = np.zeros_like(us)
+    for c in reversed(_DSINC_SERIES):
+        acc = acc * z + c
+    out[small] = np.pi ** 2 * us * acc
+    ub = u[~small]
+    out[~small] = (np.cos(np.pi * ub) - np.sinc(ub)) / ub
+    return out
+
+
 @lru_cache(maxsize=32)
 def lanczos_matrix(n_in: int, old_dt: float, offset_s: float, new_dt: float, n_out: int,
-                   a: int) -> ssp.csr_matrix:
+                   a: int, deriv: int = 0) -> ssp.csr_matrix:
     """Sparse ``(n_out, n_in)`` operator of obspy's ``lanczos_interpolation``
-    (``window="lanczos"``).
+    (``window="lanczos"``), or with ``deriv=1`` its derivative in ``offset_s``.
 
     Output ``j`` at position ``x`` (see :func:`lanczos_positions`) takes the
     taps ``floor(x) - a + 1 .. floor(x) + a``, each with weight
-    ``sinc(d) * sinc(d / a)``, where ``d = x - tap``. Taps outside the record
-    contribute zero.
+    ``K(d) = sinc(d) * sinc(d / a)``, where ``d = x - tap``. Taps outside the
+    record contribute zero. ``K`` and ``K'`` both vanish at ``|d| = a``, so the
+    operator and its derivative are continuous as ``x`` crosses a sample; the
+    second derivative is not.
+
+    The derivative's weights are ``K'(d) / old_dt``, on the same taps.
     """
     if a < 1:
         raise ValueError("a must be at least 1.")
@@ -112,9 +139,20 @@ def lanczos_matrix(n_in: int, old_dt: float, offset_s: float, new_dt: float, n_o
     i0 = np.floor(x).astype(np.int64)
     taps = i0[:, None] + np.arange(-a + 1, a + 1)[None, :]
     d = x[:, None] - taps
-    w = np.sinc(d) * np.sinc(d / a)
+    if deriv == 0:
+        w = np.sinc(d) * np.sinc(d / a)
+    elif deriv == 1:
+        w = (dsinc(d) * np.sinc(d / a) + np.sinc(d) * dsinc(d / a) / a) / old_dt
+    else:
+        raise ValueError("deriv must be 0 or 1")
     ok = (taps >= 0) & (taps < n_in)
     rows = np.broadcast_to(np.arange(n_out)[:, None], taps.shape)
     L = ssp.csr_matrix((w[ok], (rows[ok], taps[ok])), shape=(n_out, n_in))
     L.sum_duplicates()
     return L
+
+
+@lru_cache(maxsize=32)
+def lanczos_matrix_t(*args) -> ssp.csr_matrix:
+    """The transpose of :func:`lanczos_matrix`, as CSR (for adjoints)."""
+    return lanczos_matrix(*args).T.tocsr()

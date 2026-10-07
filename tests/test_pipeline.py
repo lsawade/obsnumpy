@@ -355,7 +355,8 @@ def test_out_and_split(raw):
     assert len(a) == 4 and len(b) == len(p) - 4
     ya, dta = a(raw.x, DT)
     assert np.array_equal(b(ya, dta)[0], p(raw.x, DT)[0])
-    assert p.linear
+    # PreFilt(nyquist="abs") is linear here (its taper vanishes at Nyquist), not always
+    assert p.is_linear(NT, DT) and not p.linear
 
 
 def test_matrix_refuses():
@@ -420,7 +421,7 @@ def test_linearity(raw, step):
     a, b = 1.7, -0.3
     lhs = step(a * raw.x + b * z, DT)
     rhs = a * step(raw.x, DT) + b * step(z, DT)
-    assert step.linear and rel(lhs, rhs) <= (TOL_IIR if _is_iir(step) else TOL_SAME)
+    assert step.is_linear(DT, NT) and rel(lhs, rhs) <= (TOL_IIR if _is_iir(step) else TOL_SAME)
 
 
 # ----------------------------------------------------------------------------- T2, CuPy
