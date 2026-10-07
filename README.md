@@ -187,3 +187,57 @@ SAC taper reaches Nyquist. `PreFilt` keeps obspy's behaviour by default and
 reports it per input: `is_linear(dt, npts)` is True when the taper vanishes
 at Nyquist, the usual case. `matrix()` and `adjoint()` refuse the step where
 it is not linear. `PreFilt(..., nyquist="real")` is linear always.
+
+
+## Windowed misfit
+
+`obsnumpy.misfit` is the weighted, window-tapered, data-normalised L2 misfit
+of Sawade et al. (2022), eq. (5), on arrays. Per trace and per group of
+windows k (e.g. one per wave type):
+
+    C   = sum_k sum_traces weight_k * 1/2 sum_w int tap_kw (s - d)^2 dt / N_k
+    N_k = sum_w int tap_kw d^2 dt                   (not divided where N_k = 0)
+
+This is the quantity of cmt3d's `CostGradHess.cost`, summed over wave types.
+Everything but the synthetic `s` is fixed by the data, so `build` collects it
+once into an effective weight trace per (station, component):
+
+    Omega = sum_k weight_k * sum_w tap_kw / N_k,    C = 1/2 sum int Omega (s - d)^2 dt
+
+Overlapping windows add. Wave types that share one processing collapse into
+one `Omega`, so an evaluation is one weighted sum. The taper of a window is
+obswinlib's `tukey(right - left, alpha=0.25)` on `[left, right)`.
+
+```python
+import numpy as np
+from obsnumpy.misfit import WindowedMisfit, windows_to_tapers
+
+rng = np.random.default_rng(0)
+dt, npts = 2.0, 1601
+d = rng.standard_normal((142, 3, npts))                  # processed data (sta, RTZ, t)
+s = d + 0.1 * rng.standard_normal(d.shape)               # a synthetic
+J = rng.standard_normal((10,) + d.shape)                 # its processed derivatives
+
+# windows per wave type: windows[sta][comp] = [(left, right), ...] in samples
+body = [[[(100, 300)], [(120, 320)], [(100, 300)]] for _ in range(142)]
+surface = [[[(600, 1100)], [(550, 1000)], [(600, 1100)]] for _ in range(142)]
+w_body, w_surf = rng.uniform(0.5, 1.5, (142, 3)), rng.uniform(0.5, 1.5, (142, 3))
+
+m = WindowedMisfit.build(d, dt, groups=[(windows_to_tapers(body, npts), w_body),
+                                        (windows_to_tapers(surface, npts), w_surf)])
+C = m.cost(s)                       # float; or (K,) for s of shape (K, 142, 3, npts)
+g = m.residual_weight(s)            # dC/ds: the adjoint source
+grad = m.gradient(s, J)             # dC/dm, (10,)
+H = m.gauss_newton(J)               # J^T Omega J dt, (10, 10)
+```
+
+`s` and `J` may be CuPy arrays; `d` and `Omega` move to the device once.
+`m.mask` (`Omega > 0`) marks the samples any window covers.
+
+**The Gauss-Newton Hessian.** `gauss_newton(J)` is `J^T Omega J dt`, the
+Gauss-Newton Hessian of `C`. cmt3d's `hess` instead weights each window by
+its taper *squared*, `(J_i tap) @ (J_j tap)`, against the taper in its own
+cost and gradient. The two differ on the tapers' ramps, by a few percent of
+`H`; the gradient, and so the minimum, are the same.
+`gauss_newton(J, like_cmt3d=True)` reproduces cmt3d's, given
+`tapers_sq=windows_to_tapers(..., power=2)` at build time.
