@@ -23,7 +23,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from .misfit import weighted_cost, weighted_residual
+from .misfit import weighted_cost, weighted_residual, weighted_trace_cost
 from .pipeline import tables
 from .pipeline.backend import xp_of
 
@@ -311,45 +311,69 @@ class LinearBasisModel:
         lead = g.shape[:-1]
         return (g.reshape(-1, g.shape[-1]) @ P.T).reshape(lead + (P.shape[0],))
 
-    def _cost_and_rw(self, s, keep, xp, need_rw):
+    def _cost_and_rw(self, s, keep, xp, need_rw, trace_weights=None, per_trace=False):
+        """The cost ``(K,)`` (``per_trace``: the per-trace costs ``(K, nrec,
+        ncomp)``, without ``trace_weights``) and the residual weight, with
+        ``omega`` times ``trace_weights`` ``(K, nrec, ncomp)`` if given."""
         m = self.misfit
         if m is None:
             raise ValueError("the cost needs a misfit")
         if keep is None:
-            return m.cost(s), (m.residual_weight(s) if need_rw else None)
-        key = ("pruned", self._device(xp))
-        if key not in self._P:
-            k = keep if xp is np else keep.get()
-            self._P[key] = (xp.asarray(m.d[..., k]), xp.asarray(m.omega[..., k]))
-        d, om = self._P[key]
-        return (weighted_cost(s, d, om, m.dt),
-                weighted_residual(s, d, om, m.dt) if need_rw else None)
+            if trace_weights is None and not per_trace:
+                return m.cost(s), (m.residual_weight(s) if need_rw else None)
+            d, om = m._on(xp, "d"), m._on(xp, "omega")
+        else:
+            key = ("pruned", self._device(xp))
+            if key not in self._P:
+                k = keep if xp is np else keep.get()
+                self._P[key] = (xp.asarray(m.d[..., k]), xp.asarray(m.omega[..., k]))
+            d, om = self._P[key]
+        if trace_weights is None and not per_trace:
+            return (weighted_cost(s, d, om, m.dt),
+                    weighted_residual(s, d, om, m.dt) if need_rw else None)
+        c = weighted_trace_cost(s, d, om, m.dt)
+        tw = None if trace_weights is None else xp.asarray(trace_weights, dtype=xp.float64)
+        C = c if per_trace else (c * tw).sum(axis=(-2, -1))
+        rw = None
+        if need_rw:
+            rw = weighted_residual(s, d, om, m.dt)
+            if tw is not None:
+                rw = rw * tw[..., None]
+        return C, rw
 
     # -- the evaluations ---------------------------------------------------------------
 
-    def forward(self, basis, W, tau, return_s=True):
+    def forward(self, basis, W, tau, return_s=True, trace_weights=None, per_trace=False):
         """``s`` ``(K, nrec, ncomp, npts)`` and ``C`` ``(K,)`` (``None`` without a
         misfit). With ``return_s=False`` and ``prune``, only ``C``, computed on the
-        windows' samples; ``s`` is then ``None``."""
+        windows' samples; ``s`` is then ``None``.
+
+        ``trace_weights`` ``(K, nrec, ncomp)`` multiply the misfit's ``omega``
+        per chain and trace: ``C_k = sum_i trace_weights[k, i] c_ki``.
+        ``per_trace`` returns the per-trace costs ``c`` ``(K, nrec, ncomp)``
+        instead of ``C`` (these do not include ``trace_weights``)."""
         W, tau = self._batch(W, tau, basis.U.shape[-1])
         xp = xp_of(basis.U)
         y = self.shift(basis, self.contract(basis, W), tau)
         pruned = self.prune and not return_s
         s, keep = self._process(y, xp, pruned)
-        C = None if self.misfit is None else self._cost_and_rw(s, keep, xp, False)[0]
+        C = None if self.misfit is None else self._cost_and_rw(
+            s, keep, xp, False, trace_weights, per_trace)[0]
         return (s if return_s else None), C
 
-    def gradient(self, basis, W, tau):
+    def gradient(self, basis, W, tau, trace_weights=None, per_trace=False):
         """``C`` ``(K,)``, ``dC/dW`` ``(K, nbasis)`` and ``dC/dtau`` ``(K,)``, by the
         adjoint: ``g = S^T P^T Rot^T dC/ds``, ``dC/dW = (scale U)^T g`` and
-        ``dC/dtau = <dC/ds, Rot P S'(tau) v>``."""
+        ``dC/dtau = <dC/ds, Rot P S'(tau) v>``. ``trace_weights`` and
+        ``per_trace`` as in :meth:`forward`; the derivatives are those of the
+        weighted ``C``."""
         W, tau = self._batch(W, tau, basis.U.shape[-1])
         xp = xp_of(basis.U)
         taps = self._taps(basis, tau, xp)
         v = self.contract(basis, W)
         y = self.shift(basis, v, tau, taps=taps)
         s, keep = self._process(y, xp, self.prune)
-        C, rw = self._cost_and_rw(s, keep, xp, True)
+        C, rw = self._cost_and_rw(s, keep, xp, True, trace_weights, per_trace)
         gy = self._process_adjoint(rw, xp, self.prune)                 # on the window
         dtau = (gy * self.shift(basis, v, tau, deriv=1, taps=taps)).sum(axis=(-3, -2, -1))
         gv = self.shift_adjoint(basis, gy, tau, taps=taps) * basis.scale[:, None, None]

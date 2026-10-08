@@ -286,6 +286,46 @@ def test_pruning_changes_nothing(case):
     assert rel(c2, c0) <= 1e-13 and s2.shape[-1] == case.misfit.d.shape[-1]
 
 
+# ----------------------------------------------------------------------------- trace weights
+
+def _scaled_model(case, tw, prune=False):
+    """A model whose misfit's omega is multiplied by one chain's trace weights."""
+    m = WindowedMisfit(d=case.misfit.d, omega=case.misfit.omega * tw[..., None],
+                       dt=case.misfit.dt)
+    return LinearBasisModel(case.window, case.processing, case.rotation, m, prune=prune)
+
+
+@pytest.mark.parametrize("prune", [False, True])
+def test_trace_weights_per_chain(case, prune):
+    model = LinearBasisModel(case.window, case.processing, case.rotation, case.misfit,
+                             prune=prune)
+    W, tau = case.rng.standard_normal((3, M)), np.array([0.0, 1.3, -7.7])
+    tw = case.rng.uniform(0.1, 3.0, (3, R, C))
+    _, c = model.forward(case.basis, W, tau, return_s=False, per_trace=True)
+    _, C0 = case.model.forward(case.basis, W, tau)
+    assert c.shape == (3, R, C) and rel(c.sum(axis=(-2, -1)), C0) <= 1e-13
+    _, Cw = model.forward(case.basis, W, tau, return_s=False, trace_weights=tw)
+    assert rel(Cw, (tw * c).sum(axis=(-2, -1))) <= 1e-13
+    Cg, dW, dtau = model.gradient(case.basis, W, tau, trace_weights=tw)
+    cg, _, _ = model.gradient(case.basis, W, tau, trace_weights=tw, per_trace=True)
+    assert rel(Cg, Cw) <= 1e-13 and rel(cg, c) <= 1e-13
+    for k in range(3):                                     # each chain its own omega
+        ref = _scaled_model(case, tw[k], prune).gradient(case.basis, W[k], tau[k:k + 1])
+        assert rel(Cg[k], ref[0]) <= 1e-13
+        assert rel(dW[k], ref[1][0]) <= 1e-12 and rel(dtau[k], ref[2]) <= 1e-12
+
+
+def test_gauss_newton_trace_weights(case):
+    W, tau = case.rng.standard_normal((2, M)), np.array([0.4, -2.0])
+    dWd = case.rng.standard_normal((2, 3, M))
+    _, J = case.model.jacobian(case.basis, W, tau, dWd)
+    tw = case.rng.uniform(0.1, 3.0, (2, R, C))
+    H = case.misfit.gauss_newton(J, trace_weights=tw)
+    for k in range(2):
+        ref = _scaled_model(case, tw[k]).misfit.gauss_newton(J[k])
+        assert rel(H[k], ref) <= 1e-13
+
+
 # ----------------------------------------------------------------------------- the store
 
 def basis_of(key, nbytes_scale=1):
@@ -329,6 +369,13 @@ def test_cupy(case, cp):
     dWd = case.rng.standard_normal((3, 2, M))
     sj, J = case.model.jacobian(gb, cp.asarray(W), tau, cp.asarray(dWd))
     assert rel(J.get(), case.model.jacobian(case.basis, W, tau, dWd)[1]) <= 1e-12
+    tw = case.rng.uniform(0.1, 3.0, (3, R, C))
+    for pt in (False, True):
+        g = case.model.gradient(gb, cp.asarray(W), tau, trace_weights=cp.asarray(tw),
+                                per_trace=pt)
+        g0 = case.model.gradient(case.basis, W, tau, trace_weights=tw, per_trace=pt)
+        for a, b in zip(g, g0):
+            assert rel(a.get(), b) <= 1e-12
     store = BasisStore(lambda k: case.basis, xp=cp)
     assert isinstance(store.get("x").U, cp.ndarray)
     rgb = gb.rotated(case.rotation)

@@ -97,6 +97,15 @@ def weighted_cost(s, d, omega, dt):
     return 0.5 * dt * sq.reshape(sq.shape[:-3] + (-1,)).sum(axis=-1)
 
 
+def weighted_trace_cost(s, d, omega, dt):
+    """``1/2 int omega (s - d)^2 dt`` per trace: summed over the last axis only."""
+    xp = xp_of(s)
+    if xp is np:
+        r = s - d
+        return 0.5 * dt * (omega * r * r).sum(axis=-1)
+    return 0.5 * dt * _fused(xp)["sq"](s, d, omega).sum(axis=-1)
+
+
 def weighted_residual(s, d, omega, dt):
     """``omega (s - d) dt``, the shape of ``s``."""
     xp = xp_of(s)
@@ -178,6 +187,13 @@ class WindowedMisfit:
         c = weighted_cost(s, self._on(xp, "d"), self._on(xp, "omega"), self.dt)
         return float(c) if c.ndim == 0 else c
 
+    def trace_cost(self, s):
+        """Per trace, ``1/2 int omega (s - d)^2 dt``: ``(..., nsta, ncomp)``. ``cost``
+        is its sum; a likelihood whose per-trace variances change (e.g. a sampled
+        error level) reweights these."""
+        xp = xp_of(s)
+        return weighted_trace_cost(s, self._on(xp, "d"), self._on(xp, "omega"), self.dt)
+
     def residual_weight(self, s):
         """``dC/ds = omega (s - d) dt``, the shape of ``s``."""
         xp = xp_of(s)
@@ -190,9 +206,11 @@ class WindowedMisfit:
         rw = self.residual_weight(s)
         return (J * rw[..., None, :, :, :]).sum(axis=(-3, -2, -1))
 
-    def gauss_newton(self, J, like_cmt3d=False):
+    def gauss_newton(self, J, like_cmt3d=False, trace_weights=None):
         """``J^T omega J dt``, ``(..., nparam, nparam)``: the Gauss-Newton
         Hessian of ``C`` for ``J`` of shape ``(..., nparam, nsta, ncomp, npts)``.
+        ``trace_weights`` ``(..., nsta, ncomp)`` multiply ``omega`` per trace
+        (and per batch entry), as in ``LinearBasisModel``.
 
         cmt3d's ``hess`` instead weights each window by its taper *squared*
         (``(J_i tap) @ (J_j tap)``), against the taper in its cost. The two
@@ -210,5 +228,9 @@ class WindowedMisfit:
         lead = J.shape[:-4]
         npar = J.shape[-4]
         Jf = J.reshape(lead + (npar, -1))
-        wf = w.reshape(-1)
+        if trace_weights is None:
+            wf = w.reshape(-1)
+        else:
+            tw = xp.asarray(trace_weights)
+            wf = (w * tw[..., None]).reshape(tw.shape[:-2] + (1, -1))
         return (Jf * wf) @ xp.swapaxes(Jf, -1, -2) * self.dt
