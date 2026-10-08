@@ -130,6 +130,21 @@ def test_float32_basis(case):
     assert 0 < rel(s32, s64) <= 1e-5
 
 
+def test_float32_whatever_the_magnitude_of_W(case):
+    """Weights of any magnitude keep float32's relative precision: a weight
+    vector scaled to 1e-37 (a moment-tensor derivative per dyne-cm) would
+    underflow if cast as it is."""
+    b32 = Basis(U=case.basis.U.astype(np.float32), t0=0.0, dt=DT_B, scale=case.basis.scale)
+    W = case.rng.standard_normal(M)
+    tiny, huge = 1e-37, 1e30
+    s1, _ = case.model.forward(b32, W, 1.3)
+    st, _ = case.model.forward(b32, tiny * W, 1.3)
+    sh, _ = case.model.forward(b32, huge * W, 1.3)
+    assert rel(st / tiny, s1) <= 1e-12 and rel(sh / huge, s1) <= 1e-12
+    _, J = case.model.jacobian(b32, W, 1.3, tiny * case.rng.standard_normal((1, M)))
+    assert np.abs(J[0, 0]).max() > 0
+
+
 def test_tau_outside_the_basis_raises(case):
     with pytest.raises(ValueError, match="does not cover the window"):
         case.model.forward(case.basis, np.ones(M), 50.0)

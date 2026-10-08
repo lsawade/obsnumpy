@@ -223,12 +223,10 @@ class LinearBasisModel:
     def contract(self, basis, W):
         """``scale * U W``: ``(..., nrec, ncomp, nt)`` float64 for ``W`` of
         shape ``(..., nbasis)``."""
-        xp = xp_of(basis.U)
         R, C, nt, m = basis.U.shape
         lead = W.shape[:-1]
         U2 = basis.U.reshape(-1, m)
-        v = (W.reshape(-1, m).astype(basis.U.dtype) @ U2.T).astype(xp.float64)
-        v = v.reshape(lead + (R, C, nt))
+        v = _scaled_gemm(W.reshape(-1, m), U2.T, basis.U.dtype).reshape(lead + (R, C, nt))
         return v * basis.scale[:, None, None]
 
     def _taps(self, basis, tau, xp):
@@ -357,7 +355,7 @@ class LinearBasisModel:
         gv = self.shift_adjoint(basis, gy, tau, taps=taps) * basis.scale[:, None, None]
         K, m = W.shape
         U2 = basis.U.reshape(-1, m)
-        dW = (gv.reshape(K, -1).astype(basis.U.dtype) @ U2).astype(xp.float64)
+        dW = _scaled_gemm(gv.reshape(K, -1), U2, basis.U.dtype)
         return C, dW, dtau
 
     def jacobian(self, basis, W, tau, dW):
@@ -529,3 +527,18 @@ def _scatter_cuda(cp, g, taps, w, nt):
     _launch(cp, "shift_scatter", K * RC * n, g, base, w, out, cp.int64(K), cp.int64(RC),
             cp.int64(nt), cp.int64(n), cp.int32(w.shape[-1]), cp.int32(w.shape[1] != 1))
     return out
+
+
+def _scaled_gemm(A, B, dtype):
+    """``A @ B`` with ``A`` cast to ``dtype`` (``B``'s), returned in float64.
+
+    Each row of ``A`` is divided by its largest magnitude before the cast and
+    multiplied back after. In float32 the product then keeps its relative
+    precision whatever the rows' magnitudes: a moment-tensor derivative
+    weight (per dyne-cm, ~1e-37) would otherwise underflow.
+    """
+    xp = xp_of(A)
+    A = xp.asarray(A, dtype=xp.float64)
+    s = xp.abs(A).max(axis=1, keepdims=True)
+    s = xp.where(s > 0, s, 1.0)
+    return ((A / s).astype(dtype) @ B).astype(xp.float64) * s
