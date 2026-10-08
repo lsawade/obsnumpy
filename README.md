@@ -270,6 +270,13 @@ parameters to W, and maps `dC/dW` back through its own `dW/dtheta`.
 
   `W` is `(K, nbasis)` and `tau` `(K,)`, one row per chain. A `tau` beyond
   what the basis covers raises; it does not silently zero-fill.
+
+  `forward` and `gradient` also take `trace_weights` `(K, nrec, ncomp)`:
+  each chain's own factor on `omega` per trace, for a likelihood whose
+  per-trace variances are parameters. `per_trace=True` returns the
+  per-trace costs `(K, nrec, ncomp)` (`WindowedMisfit.trace_cost`, without
+  the weights) in place of `C`, while the gradient stays that of the
+  weighted `C`.
 - `Basis.rotated(RotateNE2RT(baz))`: the rotation commutes with the rest, so
   a basis rotated once at fill time, with `rotation=None`, saves a rotation
   per evaluation.

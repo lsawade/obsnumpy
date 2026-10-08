@@ -25,7 +25,7 @@ import dataclasses
 import numpy as np
 from scipy.signal import windows as _windows
 
-from .pipeline.backend import xp_of
+from .backend import device_key, xp_of
 
 
 def windows_to_tapers(windows, npts, alpha=0.25, kind="tukey", power=1):
@@ -87,23 +87,26 @@ def _fused(cp):
     return _FUSED
 
 
-def weighted_cost(s, d, omega, dt):
-    """``1/2 sum omega (s - d)^2 dt`` over the last three axes."""
+def _weighted_sq(s, d, omega):
+    """``omega (s - d)^2``, elementwise (one fused pass on CuPy)."""
     xp = xp_of(s)
     if xp is np:
         r = s - d
-        return 0.5 * dt * (omega * r * r).sum(axis=(-3, -2, -1))
-    sq = _fused(xp)["sq"](s, d, omega)          # one pass, then CuPy's reduction
+        return omega * r * r
+    return _fused(xp)["sq"](s, d, omega)
+
+
+def weighted_cost(s, d, omega, dt):
+    """``1/2 sum omega (s - d)^2 dt`` over the last three axes."""
+    sq = _weighted_sq(s, d, omega)
+    if xp_of(s) is np:
+        return 0.5 * dt * sq.sum(axis=(-3, -2, -1))
     return 0.5 * dt * sq.reshape(sq.shape[:-3] + (-1,)).sum(axis=-1)
 
 
 def weighted_trace_cost(s, d, omega, dt):
     """``1/2 int omega (s - d)^2 dt`` per trace: summed over the last axis only."""
-    xp = xp_of(s)
-    if xp is np:
-        r = s - d
-        return 0.5 * dt * (omega * r * r).sum(axis=-1)
-    return 0.5 * dt * _fused(xp)["sq"](s, d, omega).sum(axis=-1)
+    return 0.5 * dt * _weighted_sq(s, d, omega).sum(axis=-1)
 
 
 def weighted_residual(s, d, omega, dt):
@@ -168,10 +171,17 @@ class WindowedMisfit:
                 have_sq = False
         return cls(d=d, omega=omega, dt=float(dt), omega_cmt3d=omega_sq if have_sq else None)
 
+    def take(self, cols) -> "WindowedMisfit":
+        """The misfit on the samples ``cols`` of the time axis only (e.g. those
+        some window covers): the same cost on synthetics cut to ``cols``."""
+        cut = None if self.omega_cmt3d is None else self.omega_cmt3d[..., cols]
+        return WindowedMisfit(d=self.d[..., cols], omega=self.omega[..., cols], dt=self.dt,
+                              omega_cmt3d=cut)
+
     def _on(self, xp, name):
         if xp is np:
             return getattr(self, name)
-        key = (name, xp.cuda.Device().id)
+        key = (name, device_key(xp))
         if key not in self._dev:
             self._dev[key] = xp.asarray(getattr(self, name))
         return self._dev[key]
@@ -181,10 +191,17 @@ class WindowedMisfit:
         """Where ``omega > 0``: the samples any window covers."""
         return self.omega > 0
 
-    def cost(self, s):
-        """``C(s)``: a float, or an array over the leading (batch) axes."""
+    def cost(self, s, trace_weights=None):
+        """``C(s)``: a float, or an array over the leading (batch) axes.
+        ``trace_weights`` ``(..., nsta, ncomp)`` multiply ``omega`` per trace
+        (and per batch entry): ``C = sum trace_weights * trace_cost``."""
         xp = xp_of(s)
-        c = weighted_cost(s, self._on(xp, "d"), self._on(xp, "omega"), self.dt)
+        d, om = self._on(xp, "d"), self._on(xp, "omega")
+        if trace_weights is None:
+            c = weighted_cost(s, d, om, self.dt)
+        else:
+            tw = xp.asarray(trace_weights, dtype=np.float64)
+            c = (weighted_trace_cost(s, d, om, self.dt) * tw).sum(axis=(-2, -1))
         return float(c) if c.ndim == 0 else c
 
     def trace_cost(self, s):
@@ -194,10 +211,14 @@ class WindowedMisfit:
         xp = xp_of(s)
         return weighted_trace_cost(s, self._on(xp, "d"), self._on(xp, "omega"), self.dt)
 
-    def residual_weight(self, s):
-        """``dC/ds = omega (s - d) dt``, the shape of ``s``."""
+    def residual_weight(self, s, trace_weights=None):
+        """``dC/ds = omega (s - d) dt``, the shape of ``s``; times
+        ``trace_weights`` as in :meth:`cost`."""
         xp = xp_of(s)
-        return weighted_residual(s, self._on(xp, "d"), self._on(xp, "omega"), self.dt)
+        rw = weighted_residual(s, self._on(xp, "d"), self._on(xp, "omega"), self.dt)
+        if trace_weights is None:
+            return rw
+        return rw * xp.asarray(trace_weights, dtype=np.float64)[..., None]
 
     def gradient(self, s, J):
         """``dC/dm = <dC/ds, J_m>`` for ``J`` of shape ``(..., nparam, nsta, ncomp,

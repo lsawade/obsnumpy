@@ -21,7 +21,7 @@ import dataclasses
 import numpy as np
 
 from . import tables
-from .backend import cached_to_xp, signal_of, xp_of
+from ..backend import cached_to_xp, signal_of, xp_of
 
 
 class Step:
@@ -271,7 +271,7 @@ class PreFilt(Step):
 @dataclasses.dataclass
 class Cut(Step):
     """Keep the samples ``[start, stop)`` of the last axis, Python slice
-    semantics. To cut at absolute times, see O2's ``FixedWindow``."""
+    semantics. To cut at absolute times, see ``FixedWindow``."""
 
     start: int | None = None
     stop: int | None = None

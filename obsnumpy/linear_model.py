@@ -23,9 +23,8 @@ from collections import OrderedDict
 
 import numpy as np
 
-from .misfit import weighted_cost, weighted_residual, weighted_trace_cost
 from .pipeline import tables
-from .pipeline.backend import xp_of
+from .backend import device_key, xp_of
 
 
 # ----------------------------------------------------------------------------- the basis
@@ -184,22 +183,22 @@ class LinearBasisModel:
 
     # -- compiled processing, per device ------------------------------------------------
 
-    def _device(self, xp):
-        return None if xp is np else xp.cuda.Device().id
+    def _kept_columns(self):
+        """The output samples some window covers (host indices)."""
+        if self.misfit is None:
+            raise ValueError("prune needs a misfit")
+        mask = self.misfit.mask
+        return np.flatnonzero(mask.reshape(-1, mask.shape[-1]).any(axis=0))
 
     def _proc(self, xp, pruned):
         """``(P, keep)``: the compiled processing, and with ``pruned`` the
         output columns kept (``None`` for all)."""
-        key = (self._device(xp), pruned)
+        key = (device_key(xp), pruned)
         if key not in self._P:
             P = self.processing.matrix(self.window.n, self.window.dt, xp=xp, dtype=np.float64)
             keep = None
             if pruned:
-                if self.misfit is None:
-                    raise ValueError("prune needs a misfit")
-                cols = np.flatnonzero(self.misfit.mask.reshape(-1, self.misfit.mask.shape[-1])
-                                      .any(axis=0))
-                keep = xp.asarray(cols)
+                keep = xp.asarray(self._kept_columns())
                 P = xp.ascontiguousarray(P[:, keep])
             self._P[key] = (P, keep)
         return self._P[key]
@@ -311,35 +310,21 @@ class LinearBasisModel:
         lead = g.shape[:-1]
         return (g.reshape(-1, g.shape[-1]) @ P.T).reshape(lead + (P.shape[0],))
 
-    def _cost_and_rw(self, s, keep, xp, need_rw, trace_weights=None, per_trace=False):
+    def _cost_and_rw(self, s, keep, need_rw, trace_weights=None, per_trace=False):
         """The cost ``(K,)`` (``per_trace``: the per-trace costs ``(K, nrec,
         ncomp)``, without ``trace_weights``) and the residual weight, with
-        ``omega`` times ``trace_weights`` ``(K, nrec, ncomp)`` if given."""
+        ``omega`` times ``trace_weights`` ``(K, nrec, ncomp)`` if given. With
+        ``keep``, on the pruned samples."""
         m = self.misfit
         if m is None:
             raise ValueError("the cost needs a misfit")
-        if keep is None:
-            if trace_weights is None and not per_trace:
-                return m.cost(s), (m.residual_weight(s) if need_rw else None)
-            d, om = m._on(xp, "d"), m._on(xp, "omega")
-        else:
-            key = ("pruned", self._device(xp))
+        if keep is not None:
+            key = ("pruned", id(m))
             if key not in self._P:
-                k = keep if xp is np else keep.get()
-                self._P[key] = (xp.asarray(m.d[..., k]), xp.asarray(m.omega[..., k]))
-            d, om = self._P[key]
-        if trace_weights is None and not per_trace:
-            return (weighted_cost(s, d, om, m.dt),
-                    weighted_residual(s, d, om, m.dt) if need_rw else None)
-        c = weighted_trace_cost(s, d, om, m.dt)
-        tw = None if trace_weights is None else xp.asarray(trace_weights, dtype=xp.float64)
-        C = c if per_trace else (c * tw).sum(axis=(-2, -1))
-        rw = None
-        if need_rw:
-            rw = weighted_residual(s, d, om, m.dt)
-            if tw is not None:
-                rw = rw * tw[..., None]
-        return C, rw
+                self._P[key] = m.take(self._kept_columns())
+            m = self._P[key]
+        C = m.trace_cost(s) if per_trace else m.cost(s, trace_weights)
+        return C, (m.residual_weight(s, trace_weights) if need_rw else None)
 
     # -- the evaluations ---------------------------------------------------------------
 
@@ -358,7 +343,7 @@ class LinearBasisModel:
         pruned = self.prune and not return_s
         s, keep = self._process(y, xp, pruned)
         C = None if self.misfit is None else self._cost_and_rw(
-            s, keep, xp, False, trace_weights, per_trace)[0]
+            s, keep, False, trace_weights, per_trace)[0]
         return (s if return_s else None), C
 
     def gradient(self, basis, W, tau, trace_weights=None, per_trace=False):
@@ -373,7 +358,7 @@ class LinearBasisModel:
         v = self.contract(basis, W)
         y = self.shift(basis, v, tau, taps=taps)
         s, keep = self._process(y, xp, self.prune)
-        C, rw = self._cost_and_rw(s, keep, xp, True, trace_weights, per_trace)
+        C, rw = self._cost_and_rw(s, keep, True, trace_weights, per_trace)
         gy = self._process_adjoint(rw, xp, self.prune)                 # on the window
         dtau = (gy * self.shift(basis, v, tau, deriv=1, taps=taps)).sum(axis=(-3, -2, -1))
         gv = self.shift_adjoint(basis, gy, tau, taps=taps) * basis.scale[:, None, None]
@@ -519,7 +504,7 @@ _MODULES = {}
 
 
 def _kernel(cp, name):
-    dev = cp.cuda.Device().id
+    dev = device_key(cp)
     if dev not in _MODULES:
         _MODULES[dev] = cp.RawModule(code=_CUDA_SRC)
     return _MODULES[dev].get_function(name)

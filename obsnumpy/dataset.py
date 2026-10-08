@@ -477,7 +477,7 @@ class Dataset:
         self.meta.npts = npts
 
     def taper(
-        self, max_percentage, type="hann", max_length=None, side="both", **kwargs
+        self, max_percentage, type="cosine", max_length=None, side="both", **kwargs
     ):
         """Taper the data.
 
@@ -493,8 +493,8 @@ class Dataset:
             max_percentage,
             sampling_rate=1 / self.meta.delta,
             type=type,
-            max_length=None,
-            side="both",
+            max_length=max_length,
+            side=side,
             **kwargs,
         )
 
@@ -570,7 +570,7 @@ class Dataset:
             elif isinstance(components, list):
                 idc = np.array([self.meta.components.index(comp) for comp in components])
                 if len(idc) == 1:
-                    idc = slice(idc, idc+1)
+                    idc = slice(idc[0], idc[0] + 1)
                 new_meta.components = components
 
             else:
@@ -578,27 +578,25 @@ class Dataset:
 
         if stations is not None:
             if isinstance(stations, int):
-                ids = slice(stations, stations + 1)
+                ids = np.array([stations])
 
             elif isinstance(stations, np.ndarray):
                 ids = stations
-                
-            elif len(stations) == 1:
-                ids = slice(stations, stations + 1)
                 
             elif isinstance(stations, str):
                 
                 try:
                     idx = list(self.meta.stations.codes).index(stations)
-                    ids = slice(idx, idx + 1)
+                    ids = np.array([idx])
                 except ValueError as e:
                     print(e)
                     return
             else:
-                ids = stations
- 
-            # Reindex the input metadata
-            new_meta = utils.reindex(new_meta, ids, len(self), debug=False)
+                ids = np.asarray(stations, dtype=int)
+
+            # Reindex the stations' metadata (only they are per station: a
+            # components list as long as the station list must stay)
+            new_meta.stations = utils.reindex(new_meta.stations, ids, len(self), debug=False)
 
         if stations is None and components is not None:
             new_data = self.data[:, idc, :].copy()
@@ -608,8 +606,8 @@ class Dataset:
             new_data = self.data[ids, ...].copy()
 
         elif stations is not None and components is not None:
-            # New data
-            new_data = self.data[ids, idc, :].copy()
+            # New data (two steps: two index arrays would be paired, not crossed)
+            new_data = self.data[ids][:, idc, :].copy()
 
 
         # Check whether len of data is equal the length station codes

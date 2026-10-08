@@ -19,7 +19,7 @@ import scipy.sparse as ssp
 
 from ..process import filter as _filter
 from ..process import taper as _taper
-from .backend import xp_of
+from ..backend import xp_of
 
 
 def _frozen(a):

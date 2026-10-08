@@ -86,13 +86,7 @@ class Stations:
                         f"Number of stations and {_attname}s do not match."
                     )
                 if not isinstance(_att, np.ndarray) and _attname != "attributes":
-                    try:
-                        self.__setattr__(_attname, np.ndarray(_att.tolist()))
-                    except Exception as e:
-                        print("+++++++++++++++++++++++++++++++++++++++++++++++")
-                        print(_attname, _att)
-                        print("+++++++++++++++++++++++++++++++++++++++++++++++")
-                        raise e
+                    self.__setattr__(_attname, np.asarray(_att))
     def copy(self):
         return deepcopy(self)
 
@@ -141,7 +135,7 @@ class Meta:
                 codes=np.array(meta_dict["stations"]),
                 latitudes=np.array(meta_dict["latitudes"]),
                 longitudes=np.array(meta_dict["longitudes"]),
-                burials=np.array(meta_dict["burials"]),
+                elevations=np.array(meta_dict["elevations"]),
             ),
             origin=meta_dict["origin"],
         )

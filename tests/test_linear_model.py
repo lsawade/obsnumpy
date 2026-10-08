@@ -6,7 +6,7 @@ that ends in Lanczos to 2 s, rotated, and compared through a WindowedMisfit
 with random windows.
 
 The oracle for the forward model is the explicit route, step by step with
-O1-O3's own steps: contract, Shift(tau), the pipeline uncompiled, the
+obsnumpy's own steps: contract, Shift(tau), the pipeline uncompiled, the
 rotation, the misfit. The derivatives are checked by central differences,
 and against each other: the adjoint gradient against the Jacobian's.
 """
@@ -161,7 +161,7 @@ WINDOW_DTS = [1.0, 0.6, 1.7, 2.0]
 
 @pytest.mark.parametrize("window_dt", WINDOW_DTS)
 def test_shift_adjoint_dot(window_dt):
-    """<S v, g> = <v, S^T g> per chain, and S, S' are O2's Shift step."""
+    """<S v, g> = <v, S^T g> per chain, and S, S' are the Shift step."""
     cs = make_case(window_dt=window_dt, n=int(250 / window_dt))
     rng = np.random.default_rng(3)
     v = rng.standard_normal((4, R, C, NT))
@@ -171,7 +171,7 @@ def test_shift_adjoint_dot(window_dt):
     lhs = (y * g).sum(axis=(1, 2, 3))
     rhs = (v * cs.model.shift_adjoint(cs.basis, g, tau)).sum(axis=(1, 2, 3))
     assert np.abs(lhs - rhs).max() <= 1e-12 * np.linalg.norm(y) * np.linalg.norm(g)
-    # and the shift is O2's Shift step
+    # and the shift is the Shift step
     for k in range(4):
         ref = Shift(tau[k], cs.window.dt, cs.window.n, cs.window.offset_from(0.0))(v[k], DT_B)
         assert rel(y[k], ref) <= 1e-13

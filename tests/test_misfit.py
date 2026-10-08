@@ -255,3 +255,18 @@ def test_probe_normalising_without_the_taper_fails(case):
     wrong = WindowedMisfit(d=case.d, omega=case.weights[..., None] * tap /
                            np.where(N_box != 0, N_box, 1.0), dt=DT)
     assert abs(wrong.cost(case.s) - c) > 1e3 * TOL * abs(c)
+
+
+def test_trace_cost_weights_and_take(case):
+    m = build(case)
+    tc = m.trace_cost(case.s)
+    assert tc.shape == case.d.shape[:-1] and abs(tc.sum() / m.cost(case.s) - 1) <= 1e-13
+    tw = np.random.default_rng(5).uniform(0.1, 3.0, tc.shape)
+    scaled = WindowedMisfit(d=m.d, omega=m.omega * tw[..., None], dt=m.dt)
+    assert abs(m.cost(case.s, trace_weights=tw) / scaled.cost(case.s) - 1) <= 1e-13
+    assert rel(m.residual_weight(case.s, trace_weights=tw), scaled.residual_weight(case.s)) <= 1e-15
+    cols = np.flatnonzero(m.mask.reshape(-1, m.mask.shape[-1]).any(axis=0))
+    assert len(cols) < m.d.shape[-1]
+    cut = m.take(cols)
+    assert abs(cut.cost(case.s[..., cols]) / m.cost(case.s) - 1) <= 1e-13
+    assert rel(cut.residual_weight(case.s[..., cols]), m.residual_weight(case.s)[..., cols]) == 0

@@ -20,9 +20,8 @@ def taper(
     `Supported Methods`_ section below.
 
     :type type: str
-    :param type: Type of taper to use for detrending. Defaults to
-        ``'hann'``.  See the `Supported Methods`_ section below for
-        further details.
+    :param type: Type of taper. Defaults to ``'cosine'``, the only one
+        implemented.
     :type max_percentage: None, float
     :param max_percentage: Decimal percentage of taper at one end (ranging
         from 0. to 0.5).
@@ -36,7 +35,7 @@ def taper(
     .. note::
 
         To get the same results as the default taper in SAC, use
-        `max_percentage=0.05` and leave `type` as `hann`.
+        `max_percentage=0.05` and leave `type` as `cosine`.
 
     .. note::
 
