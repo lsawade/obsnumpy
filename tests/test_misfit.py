@@ -1,17 +1,14 @@
-"""Tests of obsnumpy.misfit against cmt3d's CostGradHess (when importable)
-and against the same formula written out here.
+"""Tests of obsnumpy.misfit against cmt3d's CostGradHess formula, written
+out here.
 
 The setup has five stations, R/T/Z and random windows: overlapping windows,
 traces without windows, a trace whose data vanish in its windows (N = 0, not
 divided), and per-trace weights.
 """
-import contextlib
-import io
 import types
 
 import numpy as np
 import pytest
-from obspy import Stream, Trace
 from scipy.signal import windows as sw
 
 from obsnumpy.misfit import WindowedMisfit, windows_to_tapers
@@ -60,15 +57,15 @@ def case():
 
 def build(case, **kw):
     return WindowedMisfit.build(case.d, DT, windows_to_tapers(case.windows, NPTS),
-                                weights=case.weights,
-                                tapers_sq=windows_to_tapers(case.windows, NPTS, power=2), **kw)
+                                weights=case.weights, **kw)
 
 
 # ----------------------------------------------------------------------------- the formula, inline
 
-def inline(case, s, J=None, normalize=True, taper_power_hess=1):
-    """cmt3d costgradhess.py:124-178 (cost), :180-256 (grad), :258-330 (hess),
-    on arrays: per trace, per window, Tukey(alpha=0.25) on [left, right)."""
+def inline(case, s, J=None, normalize=True):
+    """cmt3d costgradhess.py:124-178 (cost) and :180-256 (grad), on arrays: per
+    trace, per window, Tukey(alpha=0.25) on [left, right). The Hessian is the
+    Gauss-Newton Hessian of that cost (cmt3d's hess squares the taper)."""
     cost, grad = 0.0, np.zeros(NPAR)
     hess = np.zeros((NPAR, NPAR))
     for i in range(NSTA):
@@ -82,10 +79,7 @@ def inline(case, s, J=None, normalize=True, taper_power_hess=1):
                 if J is not None:
                     wj = J[:, i, c, left:right]
                     gt += np.sum((ws - wo) * tap * wj, axis=-1) * DT
-                    if taper_power_hess == 2:          # cmt3d: (J_i tap) @ (J_j tap)
-                        ht += (wj * tap) @ (wj * tap).T * DT
-                    else:                              # the Gauss-Newton Hessian of the cost
-                        ht += (wj * tap) @ wj.T * DT
+                    ht += (wj * tap) @ wj.T * DT       # the Gauss-Newton Hessian of the cost
             w = case.weights[i, c]
             ct, gt, ht = ct * w, gt * w, ht * w
             if normalize and fnorm != 0:
@@ -110,9 +104,6 @@ def test_windows_to_tapers():
     ref[1, 0, 0:60] += sw.tukey(60, 0.25)
     ref[1, 1, 55:60] += sw.tukey(5, 0.25)
     assert np.array_equal(t, ref)
-    sq = windows_to_tapers(w, 60, power=2)[0, 0]
-    assert np.array_equal(sq[10:20], (sw.tukey(20, 0.25) ** 2)[:10])          # before the overlap
-    assert np.array_equal(sq[20:30], sw.tukey(20, 0.25)[10:] ** 2 + sw.tukey(30, 0.25)[:10] ** 2)
     assert np.array_equal(windows_to_tapers(w, 60, kind="boxcar")[0, 0, 20:30], [2.0] * 10)
     with pytest.raises(ValueError, match="not inside"):
         windows_to_tapers([[[(50, 61)]]], 60)
@@ -126,10 +117,6 @@ def test_cost_gradient_hessian_inline(case):
     assert abs(m.cost(case.s) - c) <= TOL * abs(c)
     assert rel(m.gradient(case.s, case.J), g) <= TOL
     assert rel(m.gauss_newton(case.J), h) <= TOL
-    # cmt3d's hess uses the squared taper: the like_cmt3d route
-    _, _, h2 = inline(case, case.s, case.J, taper_power_hess=2)
-    assert rel(m.gauss_newton(case.J, like_cmt3d=True), h2) <= TOL
-    assert rel(h, h2) > 1e-3                      # and the two differ
 
 
 def test_normalize_false(case):
@@ -154,37 +141,6 @@ def test_mask(case):
     assert not m.mask[1, 2].any()
 
 
-@pytest.mark.production
-def test_against_cmt3d(case):
-    try:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            from cmt3d.costgradhess import CostGradHess
-    except ImportError:
-        pytest.skip("cmt3d is not importable")
-
-    def stream(x, with_windows=False):
-        st = Stream()
-        for i in range(NSTA):
-            for c, comp in enumerate("RTZ"):
-                tr = Trace(x[i, c].copy(), header=dict(delta=DT, network="XX",
-                                                       station=f"S{i}", channel=f"BH{comp}"))
-                if with_windows:
-                    wins = case.windows[i][c]
-                    tr.stats.windows = [types.SimpleNamespace(left=a, right=b) for a, b in wins]
-                    tr.stats.tapers = [sw.tukey(b - a, alpha=0.25) for a, b in wins]
-                    tr.stats.weights = case.weights[i, c]
-                st.append(tr)
-        return st
-
-    chg = CostGradHess(data=stream(case.d, True), synt=stream(case.s),
-                       dsyn=[stream(case.J[k]) for k in range(NPAR)], normalize=True, weight=True)
-    m = build(case)
-    c = chg.cost()
-    assert abs(m.cost(case.s) - c) <= TOL * abs(c)
-    assert rel(m.gradient(case.s, case.J), chg.grad()) <= TOL
-    assert rel(m.gauss_newton(case.J, like_cmt3d=True), chg.hess()) <= TOL
-    assert rel(m.gauss_newton(case.J), chg.hess()) > 1e-3
-
 
 # ----------------------------------------------------------------------------- derivatives, groups, batches
 
@@ -204,14 +160,10 @@ def test_groups_sum(case):
     rng = np.random.default_rng(7)
     groups = [(windows_to_tapers(random_windows(rng), NPTS), rng.uniform(0.5, 2, (NSTA, NCOMP)))
               for _ in range(3)]
-    one = WindowedMisfit.build(case.d, DT, groups=groups)
-    parts = [WindowedMisfit.build(case.d, DT, tapers=t, weights=w) for t, w in groups]
+    one = WindowedMisfit.from_groups(case.d, DT, groups)
+    parts = [WindowedMisfit.build(case.d, DT, t, w) for t, w in groups]
     total = sum(p.cost(case.s) for p in parts)
     assert abs(one.cost(case.s) - total) <= TOL * abs(total)
-    with pytest.raises(ValueError):
-        WindowedMisfit.build(case.d, DT, tapers=groups[0][0], groups=groups)
-    with pytest.raises(ValueError, match="like_cmt3d"):
-        one.gauss_newton(case.J, like_cmt3d=True)
 
 
 def test_batch(case):
@@ -237,8 +189,6 @@ def test_cupy(case, cp):
     assert rel(m.residual_weight(s).get(), m.residual_weight(case.s)) <= TOL
     assert rel(m.gradient(s, J).get(), m.gradient(case.s, case.J)) <= TOL
     assert rel(m.gauss_newton(J).get(), m.gauss_newton(case.J)) <= TOL
-    assert rel(m.gauss_newton(J, like_cmt3d=True).get(),
-               m.gauss_newton(case.J, like_cmt3d=True)) <= TOL
     S = cp.stack([s, 2 * s])
     assert m.cost(S).shape == (2,)
 

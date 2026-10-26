@@ -57,6 +57,9 @@ it against obspy to 1e-12 of each trace's peak:
 obspy's default `weighted_average_slopes` interpolation is not a step, because
 it is nonlinear. `obsnumpy.process.interpolate` keeps it.
 
+`examples/pipeline.py` runs a pipeline on the test data, checks it against obspy,
+compiles it, and plots the result.
+
 The cmt3d chain, on a `Dataset` of NEZ traces:
 
 ```python
@@ -91,7 +94,7 @@ offset as a difference of two float64 epoch timestamps, each rounded to about
 and with it obspy's output to rounding. The default uses `UTCDateTime`'s exact
 nanosecond difference.
 
-**Measured** (`scripts/benchmark_pipeline.py`): the cmt3d chain on 426 traces
+**Measured** (with `scripts/benchmark_pipeline.py`, removed after ce4b5f5): the cmt3d chain on 426 traces
 × 3725 samples, `OMP_NUM_THREADS=OPENBLAS_NUM_THREADS=MKL_NUM_THREADS=1`,
 `numactl --cpunodebind=0 --membind=0`, Intel Xeon Gold 6548Y+ and an NVIDIA
 H100 NVL. Times are wall, in ms:
@@ -199,7 +202,7 @@ windows k (e.g. one per wave type):
     N_k = sum_w int tap_kw d^2 dt                   (not divided where N_k = 0)
 
 This is the quantity of cmt3d's `CostGradHess.cost`, summed over wave types.
-Everything but the synthetic `s` is fixed by the data, so `build` collects it
+Everything but the synthetic `s` is fixed by the data, so `from_groups` collects it
 once into an effective weight trace per (station, component):
 
     Omega = sum_k weight_k * sum_w tap_kw / N_k,    C = 1/2 sum int Omega (s - d)^2 dt
@@ -223,7 +226,7 @@ body = [[[(100, 300)], [(120, 320)], [(100, 300)]] for _ in range(142)]
 surface = [[[(600, 1100)], [(550, 1000)], [(600, 1100)]] for _ in range(142)]
 w_body, w_surf = rng.uniform(0.5, 1.5, (142, 3)), rng.uniform(0.5, 1.5, (142, 3))
 
-m = WindowedMisfit.build(d, dt, groups=[(windows_to_tapers(body, npts), w_body),
+m = WindowedMisfit.from_groups(d, dt, [(windows_to_tapers(body, npts), w_body),
                                         (windows_to_tapers(surface, npts), w_surf)])
 C = m.cost(s)                       # float; or (K,) for s of shape (K, 142, 3, npts)
 g = m.residual_weight(s)            # dC/ds: the adjoint source
@@ -232,15 +235,21 @@ H = m.gauss_newton(J)               # J^T Omega J dt, (10, 10)
 ```
 
 `s` and `J` may be CuPy arrays; `d` and `Omega` move to the device once.
-`m.mask` (`Omega > 0`) marks the samples any window covers.
+`m.mask` (`Omega > 0`) marks the samples any window covers. `build(d, dt,
+tapers, weights)` is the one-group case.
+`examples/windowed_misfit.py` builds P and S groups on real data and checks
+the adjoint gradient in a time shift against a finite difference.
 
-**The Gauss-Newton Hessian.** `gauss_newton(J)` is `J^T Omega J dt`, the
-Gauss-Newton Hessian of `C`. cmt3d's `hess` instead weights each window by
-its taper *squared*, `(J_i tap) @ (J_j tap)`, against the taper in its own
-cost and gradient. The two differ on the tapers' ramps, by a few percent of
-`H`; the gradient, and so the minimum, are the same.
-`gauss_newton(J, like_cmt3d=True)` reproduces cmt3d's, given
-`tapers_sq=windows_to_tapers(..., power=2)` at build time.
+`gauss_newton(J)` is `J^T Omega J dt`, the Gauss-Newton Hessian of `C`.
+cmt3d's `hess` instead weights each window by its taper *squared*; the two
+differ on the tapers' ramps, by a few percent of `H`.
+
+**Adding a misfit.** `obsnumpy/misfit/` holds one module per misfit
+(`windowed.py`), each a subclass of `obsnumpy.misfit.Misfit` (`base.py`). A
+subclass implements `trace_cost(s)` (per trace, `(..., nsta, ncomp)`),
+`_residual_weight(s)` (`dC/ds`), `mask` and `take(cols)`, and inherits
+`cost`, `residual_weight` and `gradient`, with per-trace `trace_weights`.
+That is the interface `LinearBasisModel` uses.
 
 
 ## Linear basis model
@@ -320,7 +329,7 @@ On the GPU, `S(tau)` and its adjoint are small CUDA kernels. When the window's
 sampling interval is the basis's, or an integer multiple of it, the tap
 weights depend on the chain only and are computed on the host.
 
-**Measured** (`scripts/benchmark_linear_model.py`): a basis the size of one
+**Measured** (with `scripts/benchmark_linear_model.py`, removed after ce4b5f5): a basis the size of one
 gf3d element for cmt3d, 142 x 3 x 917 x 375 float32 (0.59 GB); the cmt3d
 window and chain; the basis rotated once. One socket of an Intel Xeon Gold
 6548Y+ (`numactl` on the GPU's NUMA node), and an NVIDIA H100 NVL. Per call,
