@@ -78,7 +78,10 @@ def preprocess(
             st_temp = st.select(network=station[0], station=station[1])
             
             try:
-                st_temp.rotate("->ZNE", inventory=inv)
+                # obspy's default components=("Z12", "123") leaves channels
+                # already named N/E alone, even when the inventory says they
+                # do not point north/east (e.g. G.AIS's BHN at 5.6 deg)
+                st_temp.rotate("->ZNE", inventory=inv, components=("ZNE", "Z12", "123"))
                 new_st += st_temp
             except ValueError as e:
                 print(f"Error rotating seismograms for station {station}: {e}")

@@ -27,29 +27,7 @@ def bandpass(data: np.ndarray, freqmin, freqmax, df, corners=4, zerophase=False)
         the resulting filtered trace.
     :return: Filtered data.
     """
-    fe = 0.5 * df
-    low = freqmin / fe
-    high = freqmax / fe
-    # raise for some bad scenarios
-    if high - 1.0 > -1e-6:
-        msg = (
-            "Selected high corner frequency ({}) of bandpass is at or "
-            "above Nyquist ({}). Applying a high-pass instead."
-        ).format(freqmax, fe)
-        warnings.warn(msg)
-        return highpass(data, freq=freqmin, df=df, corners=corners, zerophase=zerophase)
-    if low > 1:
-        msg = "Selected low corner frequency is above Nyquist."
-        raise ValueError(msg)
-    z, p, k = iirfilter(
-        corners, [low, high], btype="band", ftype="butter", output="zpk"
-    )
-    sos = zpk2sos(z, p, k)
-    if zerophase:
-        firstpass = sosfilt(sos, data, axis=-1)
-        return sosfilt(sos, firstpass[..., ::-1], axis=-1)[..., ::-1]
-    else:
-        return sosfilt(sos, data, axis=-1)
+    return _apply_sos(bandpass_sos(freqmin, freqmax, df, corners), data, zerophase)
 
 
 def highpass(data: np.ndarray, freq, df, corners=4, zerophase=False):
@@ -71,19 +49,7 @@ def highpass(data: np.ndarray, freq, df, corners=4, zerophase=False):
         the resulting filtered trace.
     :return: Filtered data.
     """
-    fe = 0.5 * df
-    f = freq / fe
-    # raise for some bad scenarios
-    if f > 1:
-        msg = "Selected corner frequency is above Nyquist."
-        raise ValueError(msg)
-    z, p, k = iirfilter(corners, f, btype="highpass", ftype="butter", output="zpk")
-    sos = zpk2sos(z, p, k)
-    if zerophase:
-        firstpass = sosfilt(sos, data)
-        return sosfilt(sos, firstpass[..., ::-1], axis=-1)[..., ::-1]
-    else:
-        return sosfilt(sos, data)
+    return _apply_sos(highpass_sos(freq, df, corners), data, zerophase)
 
 
 def lowpass(data: np.ndarray, freq, df, corners=4, zerophase=False):
@@ -105,6 +71,59 @@ def lowpass(data: np.ndarray, freq, df, corners=4, zerophase=False):
         the resulting filtered trace.
     :return: Filtered data.
     """
+    return _apply_sos(lowpass_sos(freq, df, corners), data, zerophase)
+
+
+def _apply_sos(sos, data, zerophase):
+    """Apply second-order sections along the last axis, as obspy does: once
+    forwards, and with ``zerophase`` once more over the reversed result."""
+    firstpass = sosfilt(sos, data, axis=-1)
+    if not zerophase:
+        return firstpass
+    return sosfilt(sos, firstpass[..., ::-1], axis=-1)[..., ::-1]
+
+
+def bandpass_sos(freqmin, freqmax, df, corners=4):
+    """Second-order sections of :func:`bandpass` (obspy's
+    ``obspy.signal.filter.bandpass``): a Butterworth band of ``corners``
+    corners. A high corner at or above Nyquist gives the highpass sections,
+    with obspy's warning."""
+    fe = 0.5 * df
+    low = freqmin / fe
+    high = freqmax / fe
+    # raise for some bad scenarios
+    if high - 1.0 > -1e-6:
+        msg = (
+            "Selected high corner frequency ({}) of bandpass is at or "
+            "above Nyquist ({}). Applying a high-pass instead."
+        ).format(freqmax, fe)
+        warnings.warn(msg)
+        return highpass_sos(freqmin, df, corners)
+    if low > 1:
+        msg = "Selected low corner frequency is above Nyquist."
+        raise ValueError(msg)
+    z, p, k = iirfilter(
+        corners, [low, high], btype="band", ftype="butter", output="zpk"
+    )
+    return zpk2sos(z, p, k)
+
+
+def highpass_sos(freq, df, corners=4):
+    """Second-order sections of :func:`highpass` (obspy's
+    ``obspy.signal.filter.highpass``)."""
+    fe = 0.5 * df
+    f = freq / fe
+    # raise for some bad scenarios
+    if f > 1:
+        msg = "Selected corner frequency is above Nyquist."
+        raise ValueError(msg)
+    z, p, k = iirfilter(corners, f, btype="highpass", ftype="butter", output="zpk")
+    return zpk2sos(z, p, k)
+
+
+def lowpass_sos(freq, df, corners=4):
+    """Second-order sections of :func:`lowpass` (obspy's
+    ``obspy.signal.filter.lowpass``)."""
     fe = 0.5 * df
     f = freq / fe
     # raise for some bad scenarios
@@ -116,9 +135,4 @@ def lowpass(data: np.ndarray, freq, df, corners=4, zerophase=False):
         )
         warnings.warn(msg)
     z, p, k = iirfilter(corners, f, btype="lowpass", ftype="butter", output="zpk")
-    sos = zpk2sos(z, p, k)
-    if zerophase:
-        firstpass = sosfilt(sos, data)
-        return sosfilt(sos, firstpass[..., ::-1], axis=-1)[..., ::-1]
-    else:
-        return sosfilt(sos, data)
+    return zpk2sos(z, p, k)

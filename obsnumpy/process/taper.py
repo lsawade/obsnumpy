@@ -20,9 +20,8 @@ def taper(
     `Supported Methods`_ section below.
 
     :type type: str
-    :param type: Type of taper to use for detrending. Defaults to
-        ``'hann'``.  See the `Supported Methods`_ section below for
-        further details.
+    :param type: Type of taper. Defaults to ``'cosine'``, the only one
+        implemented.
     :type max_percentage: None, float
     :param max_percentage: Decimal percentage of taper at one end (ranging
         from 0. to 0.5).
@@ -36,7 +35,7 @@ def taper(
     .. note::
 
         To get the same results as the default taper in SAC, use
-        `max_percentage=0.05` and leave `type` as `hann`.
+        `max_percentage=0.05` and leave `type` as `cosine`.
 
     .. note::
 
@@ -100,17 +99,48 @@ def taper(
     ``'triang'``
         Triangular window. (uses: :func:`scipy.signal.windows.triang`)
     """
+    # Convert data if it's not a floating point type.
+    if not np.issubdtype(data.dtype, np.floating):
+        data = np.require(data, dtype=np.float64)
+
+    # Apply taper to specified axis
+    data *= taper_window(
+        data.shape[-1],
+        max_percentage,
+        sampling_rate,
+        type=type,
+        max_length=max_length,
+        side=side,
+        **kwargs,
+    )
+    return data
+
+
+def taper_window(
+    npts,
+    max_percentage,
+    sampling_rate=None,
+    type="cosine",
+    max_length=None,
+    side="both",
+    **kwargs,
+):
+    """The window that :func:`taper` multiplies a trace of ``npts`` samples by.
+
+    The same window as :meth:`obspy.core.trace.Trace.taper`; for
+    ``type="cosine"`` obspy's ``p = 1`` convention (the ramp reaches 1 at
+    sample ``wlen - 1``). ``sampling_rate`` is needed only with
+    ``max_length``. Returns a float64 array of length ``npts``.
+    """
     type = type.lower()
     side = side.lower()
     side_valid = ["both", "left", "right"]
-    npts = data.shape[-1]
     if side not in side_valid:
         raise ValueError("'side' has to be one of: %s" % side_valid)
     # retrieve function call from entry points
     current_module = sys.modules[__name__]
     current_callables = dict(inspect.getmembers(current_module, inspect.isfunction))
     for key, value in current_callables.items():
-        print(key)
         if callable(value) and value.__module__ == __name__ and key == f"_{type}":
             func = value
             break
@@ -160,13 +190,7 @@ def taper(
             )
         )
 
-    # Convert data if it's not a floating point type.
-    if not np.issubdtype(data.dtype, np.floating):
-        data = np.require(data, dtype=np.float64)
-
-    # Apply taper to specified axis
-    data *= taper[..., :]
-    return data
+    return taper
 
 
 def _cosine(npts, p=0.1, freqs=None, flimit=None, halfcosine=True, sactaper=False):

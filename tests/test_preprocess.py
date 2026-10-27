@@ -51,7 +51,7 @@ def test_preprocess_no_interpolation():
     print(length_in_s, sampling_rate, npts)
 
     # Preprocess the stream
-    preprocess(
+    pst = preprocess(
         pst,
         starttime=origin.time,
         length_in_s=length_in_s,
@@ -113,7 +113,7 @@ def test_preprocess_interpolation():
     print(length_in_s, sampling_rate, npts)
 
     # Preprocess the stream
-    preprocess(
+    pst = preprocess(
         pst,
         starttime=origin.time,
         length_in_s=length_in_s,
@@ -138,3 +138,41 @@ def test_preprocess_interpolation():
         assert sta == tr.stats.station
         assert comp == tr.stats.component
         print(tr.stats.network, tr.stats.station, tr.stats.component)
+
+
+def test_preprocess_corrects_misoriented_ne_channels():
+    """Channels named N/E whose inventory azimuths are not 0/90 deg are
+    rotated to true north/east, as obsproclib does (obspy's default
+    rotate("->ZNE") would leave them alone). II.BFO's BHN/BHE are given
+    azimuths 5.6/95.6 deg in a copy of the inventory; the result must be the
+    true-north result seen from the turned sensor, rotated back."""
+    import copy
+
+    event = obspy.read_events(testdata_event)[0]
+    inv = obspy.read_inventory(os.path.join(testdata_stations, "*.xml"))
+    st = obspy.read(os.path.join(testdata_raw, "*.mseed")).select(network="II", station="BFO")
+    kw = dict(starttime=event.origins[0].time, length_in_s=1000.0, sps=5.0,
+              pre_filt=(0.05, 0.1, 1, 2), water_level=60, rr_output="VEL", interpolate=False)
+    ref = preprocess(st.copy(), inv=inv, **kw)
+
+    a = 5.6
+    turned = copy.deepcopy(inv)
+    for ch in turned.select(network="II", station="BFO")[0][0]:
+        if ch.code == "BHN":
+            ch.azimuth = a
+        elif ch.code == "BHE":
+            ch.azimuth = 90.0 + a
+    out = preprocess(st.copy(), inv=turned, **kw)
+
+    n0, e0 = (ref.select(component=c)[0].data for c in "NE")
+    n1, e1 = (out.select(component=c)[0].data for c in "NE")
+    # the same records, now read as a sensor turned by a: true N/E are the
+    # original N/E rotated by a
+    r = np.radians(a)
+    n_true = n0 * np.cos(r) - e0 * np.sin(r)
+    e_true = n0 * np.sin(r) + e0 * np.cos(r)
+    peak = max(np.abs(n0).max(), np.abs(e0).max())
+    assert np.abs(n1 - n_true).max() <= 1e-10 * peak
+    assert np.abs(e1 - e_true).max() <= 1e-10 * peak
+    z0, z1 = (x.select(component="Z")[0].data for x in (ref, out))
+    assert np.abs(z1 - z0).max() <= 1e-12 * np.abs(z0).max()      # recomputed, same values

@@ -245,7 +245,7 @@ class Dataset:
         if not isinstance(st, obspy.Stream):
             raise ValueError("Input data must be an Obspy Stream.")
 
-        if interpolate not in kwargs:
+        if "interpolate" not in kwargs:
             kwargs["interpolate"] = True
         else:
             if kwargs["interpolate"] is False:
@@ -270,8 +270,8 @@ class Dataset:
                             "If interpolate is explicitly set to False, all traces must have the same starttime."
                         )
 
-        # Preprocess stream
-        preprocess(st, *args, **kwargs)
+        # Preprocess stream (preprocess works on a copy and returns it)
+        st = preprocess(st, *args, **kwargs)
 
         # Get inv if it is in kwargs
         if "inv" in kwargs:
@@ -477,7 +477,7 @@ class Dataset:
         self.meta.npts = npts
 
     def taper(
-        self, max_percentage, type="hann", max_length=None, side="both", **kwargs
+        self, max_percentage, type="cosine", max_length=None, side="both", **kwargs
     ):
         """Taper the data.
 
@@ -493,10 +493,21 @@ class Dataset:
             max_percentage,
             sampling_rate=1 / self.meta.delta,
             type=type,
-            max_length=None,
-            side="both",
+            max_length=max_length,
+            side=side,
             **kwargs,
         )
+
+    def apply(self, pipeline) -> Dataset:
+        """Run an :class:`obsnumpy.pipeline.Pipeline` on the data, in place.
+
+        The metadata follow the steps: ``delta``, ``npts``, ``starttime`` (from
+        ``Cut`` and ``Interpolate``) and ``components`` (from ``RotateNE2RT``).
+        Returns the dataset.
+        """
+        from .pipeline import apply_to_dataset
+
+        return apply_to_dataset(self, pipeline)
 
     def convolve(self, wavelet: np.ndarray, tshift: float = 0.0):
         """The expectation is that the wavelet is at the same sampling rate as,
@@ -559,7 +570,7 @@ class Dataset:
             elif isinstance(components, list):
                 idc = np.array([self.meta.components.index(comp) for comp in components])
                 if len(idc) == 1:
-                    idc = slice(idc, idc+1)
+                    idc = slice(idc[0], idc[0] + 1)
                 new_meta.components = components
 
             else:
@@ -567,27 +578,25 @@ class Dataset:
 
         if stations is not None:
             if isinstance(stations, int):
-                ids = slice(stations, stations + 1)
+                ids = np.array([stations])
 
             elif isinstance(stations, np.ndarray):
                 ids = stations
-                
-            elif len(stations) == 1:
-                ids = slice(stations, stations + 1)
                 
             elif isinstance(stations, str):
                 
                 try:
                     idx = list(self.meta.stations.codes).index(stations)
-                    ids = slice(idx, idx + 1)
+                    ids = np.array([idx])
                 except ValueError as e:
                     print(e)
                     return
             else:
-                ids = stations
- 
-            # Reindex the input metadata
-            new_meta = utils.reindex(new_meta, ids, len(self), debug=False)
+                ids = np.asarray(stations, dtype=int)
+
+            # Reindex the stations' metadata (only they are per station: a
+            # components list as long as the station list must stay)
+            new_meta.stations = utils.reindex(new_meta.stations, ids, len(self), debug=False)
 
         if stations is None and components is not None:
             new_data = self.data[:, idc, :].copy()
@@ -597,8 +606,8 @@ class Dataset:
             new_data = self.data[ids, ...].copy()
 
         elif stations is not None and components is not None:
-            # New data
-            new_data = self.data[ids, idc, :].copy()
+            # New data (two steps: two index arrays would be paired, not crossed)
+            new_data = self.data[ids][:, idc, :].copy()
 
 
         # Check whether len of data is equal the length station codes
